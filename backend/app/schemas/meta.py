@@ -28,3 +28,13 @@ class HealthResponse(BaseModel):
 
     status: str = Field(..., description="固定为 ok")
     version: str = Field(..., description="应用版本号")
+
+
+class AiStatusResponse(BaseModel):
+    """GET /ai/status 的响应，用于前端和排障时确认模型是否已接上。"""
+
+    configured: bool = Field(..., description="是否配置了可用的模型密钥")
+    provider: str = Field(..., description="openai=兼容接口，dify=工作流")
+    model: str = Field(..., description="文本模型名")
+    vision_model: str = Field(..., description="视觉模型名；空串表示未启用图片识别")
+    fallback: str = Field(..., description="不可用时的兜底方式")

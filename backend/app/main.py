@@ -13,10 +13,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import budgets, receipts, stats, transactions
+from app.ai import llm
+from app.api import budgets, query, receipts, stats, transactions
 from app.core.errors import register_error_handlers
 from app.db import init_db
-from app.schemas.meta import CategoryOption, HealthResponse
+from app.schemas.meta import AiStatusResponse, CategoryOption, HealthResponse
 from app.schemas.transaction import Category
 
 
@@ -47,6 +48,7 @@ app = FastAPI(
     # 控制 /docs 和导入 Apifox 后的接口分组顺序。
     openapi_tags=[
         {"name": "记账", "description": "解析、保存与查询账目"},
+        {"name": "查账", "description": "自然语言提问，返回查询条件或直接给结果"},
         {"name": "小票识别", "description": "上传小票或支付截图，生成待确认的草稿"},
         {"name": "统计", "description": "按类别汇总支出"},
         {"name": "预算", "description": "按月设置预算并判断是否接近或超出上限"},
@@ -75,6 +77,7 @@ app.add_middleware(
 # 统一异常处理后，挂载业务路由
 register_error_handlers(app)
 app.include_router(transactions.router)
+app.include_router(query.router)
 app.include_router(receipts.router)
 app.include_router(stats.router)
 app.include_router(budgets.router)
@@ -84,6 +87,23 @@ app.include_router(budgets.router)
 @app.get("/health", tags=["运维"], summary="健康检查", response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse(status="ok", version=app.version)
+
+
+@app.get(
+    "/ai/status",
+    tags=["运维"],
+    summary="大模型接入状态",
+    response_model=AiStatusResponse,
+)
+def ai_status() -> AiStatusResponse:
+    """返回当前模型配置，供前端显示「AI 已接入 / 规则模式」。"""
+    return AiStatusResponse(
+        configured=llm.configured(),
+        provider=llm.provider(),
+        model=llm.model_name(),
+        vision_model=llm.vision_model_name(),
+        fallback="规则解析（关键词 + 正则）",
+    )
 
 
 """

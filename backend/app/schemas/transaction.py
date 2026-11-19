@@ -94,6 +94,10 @@ class TransactionDraft(BaseModel):
         description="未识别出的字段名列表",
     )
     raw_text: str | None = Field(None, description="原始文本")
+    engine: str = Field(
+        "rule",
+        description="解析引擎：llm=大模型，rule=规则兜底，none=未识别（图片未配置视觉模型）",
+    )
 
     @field_validator("occurred_at")
     @classmethod

@@ -1,13 +1,13 @@
 """小票与支付截图上传接口。
 
-POST /receipts/parse 目前只做文件校验并生成空草稿，视觉识别尚未接入；
-返回的 amount_cents、merchant、occurred_at、category 都是 None，
-前端根据 missing_fields 提示用户补全。
+POST /receipts/parse 先做文件校验，再交给视觉模型抽取字段；
+未配置视觉模型时返回空草稿，前端根据 missing_fields 提示用户补全。
 """
 
 from fastapi import APIRouter, File, UploadFile, status
 
 from app import store
+from app.ai import receipt_ocr
 from app.core.errors import (
     VALIDATION_ERROR_RESPONSES,
     ApiError,
@@ -105,18 +105,31 @@ def parse_receipt(
     if not content:
         raise ApiError(code="EMPTY_FILE", message="文件为空")
 
-    # 视觉识别尚未接入：这里只生成空草稿，字段全为 None，由前端提示用户补全。
+    # 视觉模型抽取；未配置 AI_VISION_MODEL 时返回空结果，由前端提示用户手动补全。
+    recognition = receipt_ocr.recognize(content, file.content_type or "image/png")
+
     draft = TransactionDraft(
         # draft_id 由 store.new_draft_id() 生成，后续保存账目时回传。
         draft_id=store.new_draft_id(),
         source=Source.RECEIPT,
-        amount_cents=None,
-        merchant=None,
-        occurred_at=None,
-        category=None,
-        confidence=0.0,
+        amount_cents=recognition.amount_cents,
+        merchant=recognition.merchant,
+        occurred_at=recognition.occurred_at,
+        category=recognition.category,
+        confidence=recognition.confidence,
         # 与草稿字段顺序一致，前端按这个数组标记待补项。
-        missing_fields=["amount_cents", "merchant", "occurred_at", "category"],
+        missing_fields=[
+            name
+            for name, value in (
+                ("amount_cents", recognition.amount_cents),
+                ("merchant", recognition.merchant),
+                ("occurred_at", recognition.occurred_at),
+                ("category", recognition.category),
+            )
+            if value is None
+        ],
+        raw_text=recognition.raw_text,
+        engine=recognition.engine,
     )
     # save_draft() 写入 transaction_drafts 并 commit，返回值直接作为响应。
     return store.save_draft(conn, draft)
