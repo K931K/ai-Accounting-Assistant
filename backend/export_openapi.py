@@ -7,13 +7,10 @@
 """
 
 import json
-import os
 from pathlib import Path
 
-# db.py 在模块导入时读取 DATABASE_URL；这里兜底成内存 SQLite，
-# 避免执行导出脚本时在 backend/data 下创建数据库文件。
-os.environ.setdefault("DATABASE_URL", "sqlite://")
-
+# 导入 app.main 不会连接数据库：连接只在应用启动的 lifespan 里建立，
+# 所以导出契约不需要 MySQL 正在运行。
 from app.main import app  # noqa: E402
 
 # 相对 backend/export_openapi.py 定位到仓库的 docs/api 目录。

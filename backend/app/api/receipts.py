@@ -13,7 +13,7 @@ from app.core.errors import (
     ApiError,
     ErrorResponse,
 )
-from app.db import SessionDep
+from app.db import ConnDep
 from app.schemas.transaction import Source, TransactionDraft
 
 router = APIRouter(
@@ -65,13 +65,13 @@ _MAX_BYTES = 32 * 1024 * 1024
     },
 )
 def parse_receipt(
-    session: SessionDep,
+    conn: ConnDep,
     file: UploadFile = File(..., description="小票或支付截图"),
 ) -> TransactionDraft:
     """校验上传文件，并写入 source=receipt 的空草稿。
 
     参数:
-        session: 请求级会话，交给 store.save_draft() 写入 transaction_drafts。
+        conn: 请求级连接，交给 store.save_draft() 写入 transaction_drafts。
         file: multipart 字段名为 file；content_type 和文件大小在这里校验。
 
     返回:
@@ -119,4 +119,4 @@ def parse_receipt(
         missing_fields=["amount_cents", "merchant", "occurred_at", "category"],
     )
     # save_draft() 写入 transaction_drafts 并 commit，返回值直接作为响应。
-    return store.save_draft(session, draft)
+    return store.save_draft(conn, draft)

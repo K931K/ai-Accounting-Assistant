@@ -22,10 +22,10 @@ from app.schemas.transaction import Category
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """应用启动时建表。
+    """应用启动时建库建表。
 
-    init_db() 来自 app.db，只执行 create_all 创建缺失表；
-    已有表结构不会被修改，字段变更需要单独迁移。
+    init_db() 来自 app.db，用 CREATE TABLE IF NOT EXISTS 建缺失的表，
+    并给老库补上新增的列和索引；已有表结构和数据都不会被改动。
     """
     init_db()
     yield

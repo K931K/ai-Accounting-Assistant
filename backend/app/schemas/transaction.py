@@ -1,6 +1,6 @@
 """记账相关的 Pydantic 请求/响应模型。
 
-这些模型是 HTTP 契约，不是数据库表；数据库表定义在 app/models.py。
+这些模型是 HTTP 契约，不是数据库表；数据库表由 app/db.py 的建表语句创建。
 - 请求模型负责字段类型、长度、时区和枚举校验；
 - 响应模型负责把 store 层的结果序列化成 JSON；
 - 字段命名统一 snake_case，金额单位「分」，时间入参必须带时区，响应统一 UTC。
@@ -18,7 +18,7 @@ class Category(str, Enum):
     """消费类别枚举。
 
     API、数据库和 /categories 接口共用这组中文值；
-    models.py 的枚举列存 value，不是 Python 枚举名。
+    写入数据库的是枚举的 value，不是 Python 枚举名。
     """
 
     FOOD = "餐饮"
@@ -79,7 +79,7 @@ class TransactionDraft(BaseModel):
     前端据此把对应输入框标记为待补项。
     """
 
-    # 允许从 ORM 行构造；当前路由直接构造草稿。
+    # 允许从字典构造；当前路由直接构造草稿。
     model_config = ConfigDict(from_attributes=True)
 
     draft_id: str = Field(..., description="草稿 id，提交时回传")
@@ -124,7 +124,7 @@ class CreateTransactionRequest(BaseModel):
         description="来源；不传时按草稿推断，无草稿则记为 manual",
     )
     amount_cents: int = Field(..., gt=0, description="金额，单位「分」，必须大于 0")
-    merchant: str = Field(..., min_length=1, max_length=100, description="商户名")
+    merchant: str = Field(..., min_length=1, max_length=30, description="商户名")
     occurred_at: datetime = Field(..., description="消费时间，ISO 8601 带时区")
     category: Category = Field(..., description="消费类别")
     note: str | None = Field(None, max_length=200, description="备注")
@@ -160,7 +160,7 @@ class CreateTransactionRequest(BaseModel):
 class Transaction(BaseModel):
     """保存成功后的账目响应，对应 transactions 表的一行。
 
-    store.create_transaction() 用 model_validate() 从 ORM 行构造；
+    store.create_transaction() 用数据库返回的一行构造；
     id 和 created_at 由数据库生成，时间字段统一为 UTC。
     """
 

@@ -10,8 +10,7 @@
 
 - Python 3.11+
 - FastAPI + Pydantic v2
-- SQLAlchemy 2.x
-- SQLite（本地开发）/ MySQL（生产环境）
+- PyMySQL + MySQL 8
 - Uvicorn
 - Streamlit（前端页面）
 
@@ -21,7 +20,7 @@
 
 - 已完成记账核心接口：一句话解析、保存账目、账目查询、分类统计。
 - 已完成预算接口：按月设置总预算或类别预算，返回已用比例和超支状态。
-- 数据层已从进程内存储迁移到 SQLAlchemy，默认使用 SQLite，预留 MySQL 连接配置。
+- 数据层直连 MySQL，全部使用原生 SQL；应用启动时自动建库、建表并补齐缺失的列与索引。
 - 接口统一使用 `snake_case`；金额以「分」为单位存储，时间统一使用 UTC。
 - 错误响应统一为 `{code, message, detail}`，参数校验、404、405 使用同一结构。
 - 已提供小票/支付截图上传接口，目前完成文件类型、大小校验和空草稿生成；OCR 接口留在 `backend/app/ai/receipt_ocr.py`。
@@ -35,8 +34,7 @@ ai-Accounting-Assistant/
 ├── backend/                        # 后端服务
 │   ├── app/
 │   │   ├── main.py                 # 应用入口：初始化数据库、中间件、路由
-│   │   ├── db.py                   # 数据库引擎、会话、建表
-│   │   ├── models.py               # SQLAlchemy 表结构
+│   │   ├── db.py                   # MySQL 连接、建表与按请求注入连接
 │   │   ├── store.py                # 数据访问层：账目、草稿、预算的读写
 │   │   ├── api/
 │   │   │   ├── transactions.py     # 解析、保存、查询、删除账目
@@ -76,6 +74,9 @@ cd backend
 uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
+数据库连接参数写在 `backend/.env`（复制 `backend/.env.example` 后填入 MySQL 账号密码），
+应用启动时会自动建库建表。
+
 前端（端口 8501）：
 
 ```powershell
@@ -90,7 +91,7 @@ uv run streamlit run app.py
 |---|---|---|
 | 前端（Streamlit） | 单文件实现记账、查账、统计三个功能区；查账已接入真实接口 | 补充预算页，优化交互细节 |
 | 账单删除 | 后端已提供 `DELETE /transactions/{id}`，前端暂未接入 | 前端改为调用删除接口并加二次确认 |
-| 生产数据库 | 当前使用本地 SQLite，尚未接入 MySQL 实例 | 完成 MySQL 建库、字符集、索引和迁移脚本，接入生产数据库 |
+| 数据库 | 已接入 MySQL，启动时自动建库建表并补齐索引 | 补充迁移脚本，支持表结构调整与生产实例部署 |
 | Docker 部署 | Dockerfile 已准备 | 完成镜像构建、容器编排、环境变量与数据卷联调 |
 | AI 文本抽取 | 规则匹配，AI 接口已在 `ai/text_extract.py` 预留 | 接入大模型替换规则解析，补充抽取质量测试 |
 | 小票/图片识别 | 上传校验与空草稿，OCR 接口已在 `ai/receipt_ocr.py` 预留 | 接入 OCR 或视觉模型，完成端到端测试 |

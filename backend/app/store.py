@@ -1,23 +1,26 @@
-"""数据访问层：账目与解析草稿的读写。
+"""数据访问层：账目、解析草稿与预算的读写，全部使用原生 SQL。
 
-api/*.py 只通过 SessionDep 拿到 Session，所有 SQL 都调用这里：
-- save_draft()        INSERT transaction_drafts
-- create_transaction() 查询/删除草稿 + INSERT transactions，同一次 commit
-- list_transactions()  COUNT + SELECT transactions
-- category_totals()    GROUP BY category 聚合
+约定：
+- 金额：数据库存「元」（DECIMAL(10,2)），API 用「分」（int），换算只在本层做；
+- 时间：数据库存 UTC 的 naive DATETIME，读出来统一补回 UTC 时区；
+- 连接：由 app.db.get_conn 按请求创建，本层只使用调用方传入的连接，不自己建也不关闭；
+- 事务：写操作在函数内 commit，异常交给连接依赖统一回滚。
 
-这些函数接收调用方传入的 Session，不创建 Session，也不处理 HTTP 状态码。
+api/*.py 只负责 HTTP 入参、状态码和响应组装，SQL 都在这里。
 """
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import ROUND_HALF_UP, Decimal
 from uuid import uuid4
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from pymysql.connections import Connection
 
-from app.models import BudgetORM, TransactionDraftORM, TransactionORM
 from app.schemas.transaction import Category, Source, Transaction, TransactionDraft
+
+# 数据库金额是两位小数，换算后用这个模板把多余的精度截掉。
+_CENTS = Decimal("0.01")
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,43 +35,104 @@ class CategoryTotal:
     count: int
 
 
+@dataclass(frozen=True, slots=True)
+class BudgetRow:
+    """budgets 表的一行查询结果，供 api/budgets.py 组装响应。
+
+    month 来自 period 列；category 为空字符串表示整月总预算。
+    """
+
+    id: int
+    month: str
+    category: str
+    amount_cents: int
+    threshold: float
+
+
+def _to_amount(cents: int) -> Decimal:
+    """金额从「分」转成入库的「元」，保留两位小数。"""
+    return (Decimal(cents) / 100).quantize(_CENTS)
+
+
+def _to_cents(amount: Decimal | None) -> int | None:
+    """金额从库里的「元」转回接口用的「分」；空值原样返回 None。"""
+    if amount is None:
+        return None
+    return int((Decimal(amount) * 100).to_integral_value(rounding=ROUND_HALF_UP))
+
+
+def _to_db_datetime(value: datetime | None) -> datetime | None:
+    """带时区的时间转成入库用的 naive UTC。
+
+    MySQL 的 DATETIME 不存时区，统一按 UTC 落库，读出来再补 UTC，
+    这样接口出入参都是 UTC，不受服务器本地时区影响。
+    """
+    if value is None:
+        return None
+    return value.astimezone(UTC).replace(tzinfo=None)
+
+
+def _from_db_datetime(value: datetime | None) -> datetime | None:
+    """库里的 naive UTC 补上 UTC 时区，供 Pydantic 响应模型序列化。"""
+    if value is None:
+        return None
+    return value.replace(tzinfo=UTC)
+
+
+def _row_to_transaction(row: dict) -> Transaction:
+    """把 transactions 的一行转成接口响应模型。"""
+    return Transaction(
+        id=row["id"],
+        amount_cents=_to_cents(row["amount"]) or 0,
+        merchant=row["merchant"],
+        occurred_at=_from_db_datetime(row["occurred_at"]),
+        category=Category(row["category"]),
+        source=Source(row["source"]),
+        note=row["note"],
+        created_at=_from_db_datetime(row["created_at"]),
+    )
+
+
 def new_draft_id() -> str:
     """生成 32 位 uuid4 hex，作为 transaction_drafts.draft_id 和接口 draft_id。"""
     return uuid4().hex
 
 
-def save_draft(session: Session, draft: TransactionDraft) -> TransactionDraft:
+def save_draft(conn: Connection, draft: TransactionDraft) -> TransactionDraft:
     """把 TransactionDraft 写入 transaction_drafts 并提交。
 
     参数:
-        session: 请求级 Session。
-        draft: api 层构造的草稿，字段与 TransactionDraftORM 一一对应。
+        conn: 请求级连接。
+        draft: api 层构造的草稿，字段与 transaction_drafts 列一一对应。
 
     返回:
         传入的 draft 本身；调用方直接作为响应返回。
-
-    副作用:
-        session.add() + commit() 后草稿行落库，created_at 使用当前 UTC 时间。
     """
-    row = TransactionDraftORM(
-        draft_id=draft.draft_id,
-        source=draft.source,
-        amount_cents=draft.amount_cents,
-        merchant=draft.merchant,
-        occurred_at=draft.occurred_at,
-        category=draft.category,
-        confidence=draft.confidence,
-        missing_fields=draft.missing_fields,
-        raw_text=draft.raw_text,
-        created_at=datetime.now(UTC),
-    )
-    session.add(row)
-    session.commit()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO transaction_drafts "
+            "(draft_id, source, amount, merchant, occurred_at, category, "
+            " confidence, missing_fields, raw_text, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                draft.draft_id,
+                draft.source.value,
+                _to_amount(draft.amount_cents) if draft.amount_cents is not None else None,
+                draft.merchant,
+                _to_db_datetime(draft.occurred_at),
+                draft.category.value if draft.category else None,
+                draft.confidence,
+                json.dumps(draft.missing_fields, ensure_ascii=False),
+                draft.raw_text,
+                _to_db_datetime(datetime.now(UTC)),
+            ),
+        )
+    conn.commit()
     return draft
 
 
 def create_transaction(
-    session: Session,
+    conn: Connection,
     *,
     amount_cents: int,
     merchant: str,
@@ -81,67 +145,72 @@ def create_transaction(
     """保存一笔账，并处理 draft_id 对应的草稿。
 
     参数:
-        session: 请求级 Session。
+        conn: 请求级连接。
         amount_cents / merchant / occurred_at / category: 已由 CreateTransactionRequest 校验。
         source: 请求显式指定的来源；为 None 时尝试从草稿读取，最后回退 manual。
         note: 备注，可为 None。
         draft_id: 草稿 id；对应行存在时读取 source 并删除。
 
     返回:
-        Transaction：commit + refresh 后的 ORM 行转换而来，包含自增 id 和 created_at。
+        Transaction：入库后的账目，包含自增 id 和 created_at。
 
     事务:
-        查询草稿、删除草稿、插入账目在同一次 commit 中完成；
-        插入失败时草稿删除也会回滚。
+        查草稿、删草稿、插账目在同一次 commit 里完成，中途失败一起回滚。
     """
-    if draft_id:
-        # 只有请求带了 draft_id 才查草稿；查不到时按普通账目处理，不报错。
-        draft = session.get(TransactionDraftORM, draft_id)
-        if draft is not None:
-            # 请求显式传了 source 就优先用它，否则继承草稿的 source。
-            source = source or draft.source
-            session.delete(draft)
+    with conn.cursor() as cur:
+        if draft_id:
+            # 只有请求带了 draft_id 才查草稿；查不到时按普通账目处理，不报错。
+            cur.execute(
+                "SELECT source FROM transaction_drafts WHERE draft_id = %s",
+                (draft_id,),
+            )
+            draft = cur.fetchone()
+            if draft is not None:
+                # 请求显式传了 source 就优先用它，否则继承草稿的 source。
+                source = source or Source(draft["source"])
+                cur.execute("DELETE FROM transaction_drafts WHERE draft_id = %s", (draft_id,))
 
-    row = TransactionORM(
-        amount_cents=amount_cents,
-        merchant=merchant,
-        occurred_at=occurred_at,
-        category=category,
-        # 没有草稿且请求没传 source 时，视为手工录入。
-        source=source or Source.MANUAL,
-        note=note,
-        created_at=datetime.now(UTC),
-    )
-    session.add(row)
-    session.commit()
-    # refresh 读取数据库生成的自增 id 和 created_at，再转成 Pydantic 响应模型。
-    session.refresh(row)
-    return Transaction.model_validate(row)
+        cur.execute(
+            "INSERT INTO transactions "
+            "(amount, merchant, category, occurred_at, created_at, source, note, status) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                _to_amount(amount_cents),
+                merchant,
+                category.value,
+                _to_db_datetime(occurred_at),
+                _to_db_datetime(datetime.now(UTC)),
+                # 没有草稿且请求没传 source 时，视为手工录入。
+                (source or Source.MANUAL).value,
+                note,
+                "confirmed",
+            ),
+        )
+        transaction_id = cur.lastrowid
+        cur.execute(
+            "SELECT id, amount, merchant, category, occurred_at, created_at, source, note "
+            "FROM transactions WHERE id = %s",
+            (transaction_id,),
+        )
+        row = cur.fetchone()
+    conn.commit()
+    return _row_to_transaction(row)
 
 
-def delete_transaction(session: Session, transaction_id: int) -> bool:
+def delete_transaction(conn: Connection, transaction_id: int) -> bool:
     """按 id 删除一笔账目。
-
-    参数:
-        session: 请求级 Session。
-        transaction_id: transactions.id；不存在时不做任何写入。
 
     返回:
         True 表示删除成功；False 表示 id 不存在。
-
-    事务:
-        单条 DELETE，commit 后立即生效；草稿表不受影响。
     """
-    row = session.get(TransactionORM, transaction_id)
-    if row is None:
-        return False
-    session.delete(row)
-    session.commit()
-    return True
+    with conn.cursor() as cur:
+        affected = cur.execute("DELETE FROM transactions WHERE id = %s", (transaction_id,))
+    conn.commit()
+    return affected > 0
 
 
 def list_transactions(
-    session: Session,
+    conn: Connection,
     *,
     date_from: datetime | None = None,
     date_to: datetime | None = None,
@@ -152,9 +221,8 @@ def list_transactions(
     """按时间和类别筛选 transactions，返回当前页与总数。
 
     参数:
-        date_from / date_to: 可选的时间边界，已转 UTC；
-                             分别对应 occurred_at >= date_from 和 <= date_to。
-        category: 可选类别，对应 category = category。
+        date_from / date_to: 可选的时间边界，已转 UTC；闭区间。
+        category: 可选类别。
         limit / offset: 分页参数，由 TransactionQuery 限制 limit 1~100、offset >= 0。
 
     返回:
@@ -164,33 +232,35 @@ def list_transactions(
         先 COUNT(*) 得到 total，再执行带排序和分页的 SELECT；
         排序为 occurred_at DESC, id DESC，保证同一时间的账目分页稳定。
     """
-    # filters 收集非空条件，COUNT 和 SELECT 复用同一组条件。
-    filters = []
+    # conditions 收集非空条件，COUNT 和 SELECT 复用同一组。
+    conditions: list[str] = []
+    params: list[object] = []
     if date_from is not None:
-        filters.append(TransactionORM.occurred_at >= date_from)
+        conditions.append("occurred_at >= %s")
+        params.append(_to_db_datetime(date_from))
     if date_to is not None:
-        filters.append(TransactionORM.occurred_at <= date_to)
+        conditions.append("occurred_at <= %s")
+        params.append(_to_db_datetime(date_to))
     if category is not None:
-        filters.append(TransactionORM.category == category)
+        conditions.append("category = %s")
+        params.append(category.value)
+    where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
 
-    # total 是筛选后的总条数，不是当前页条数。
-    total = session.scalar(
-        select(func.count()).select_from(TransactionORM).where(*filters)
-    ) or 0
-    rows = session.scalars(
-        select(TransactionORM)
-        .where(*filters)
-        # id 作为次级排序，保证同一时间的账目分页时顺序稳定。
-        .order_by(TransactionORM.occurred_at.desc(), TransactionORM.id.desc())
-        .offset(offset)
-        .limit(limit)
-    ).all()
-    # ORM 行逐条转成 Pydantic 响应模型，避免把 SQLAlchemy 对象暴露给 API 层。
-    return [Transaction.model_validate(row) for row in rows], total
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT COUNT(*) AS total FROM transactions{where}", params)
+        total = int(cur.fetchone()["total"])
+        cur.execute(
+            "SELECT id, amount, merchant, category, occurred_at, created_at, source, note "
+            f"FROM transactions{where} "
+            "ORDER BY occurred_at DESC, id DESC LIMIT %s OFFSET %s",
+            (*params, limit, offset),
+        )
+        rows = cur.fetchall()
+    return [_row_to_transaction(row) for row in rows], total
 
 
 def category_totals(
-    session: Session,
+    conn: Connection,
     *,
     date_from: datetime | None = None,
     date_to: datetime | None = None,
@@ -205,103 +275,121 @@ def category_totals(
         没有数据时返回 ([], 0)。
 
     SQL:
-        SELECT category, SUM(amount_cents), COUNT(id)
-        ... GROUP BY category
-        api/stats.py 用这些行计算 ratio。
+        SELECT category, SUM(amount), COUNT(*)
+        ... WHERE ... GROUP BY category
     """
-    filters = []
+    conditions: list[str] = []
+    params: list[object] = []
     if date_from is not None:
-        filters.append(TransactionORM.occurred_at >= date_from)
+        conditions.append("occurred_at >= %s")
+        params.append(_to_db_datetime(date_from))
     if date_to is not None:
-        filters.append(TransactionORM.occurred_at <= date_to)
+        conditions.append("occurred_at <= %s")
+        params.append(_to_db_datetime(date_to))
+    where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
 
-    rows = session.execute(
-        select(
-            TransactionORM.category,
-            func.sum(TransactionORM.amount_cents),
-            func.count(TransactionORM.id),
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT category, SUM(amount) AS total_amount, COUNT(*) AS count "
+            f"FROM transactions{where} GROUP BY category",
+            params,
         )
-        .where(*filters)
-        .group_by(TransactionORM.category)
-    ).all()
+        rows = cur.fetchall()
 
-    # 数据库返回的是 Row，这里转成不可变的 CategoryTotal，并统一整数类型。
+    # 数据库返回 Decimal 金额和计数，这里统一转成「分」并按金额降序。
     items = [
         CategoryTotal(
-            category=category,
-            total_cents=int(total or 0),
-            count=int(count),
+            category=Category(row["category"]),
+            total_cents=_to_cents(row["total_amount"]) or 0,
+            count=int(row["count"]),
         )
-        for category, total, count in rows
+        for row in rows
     ]
-    # 接口约定 items 按金额从高到低排序，排序放在 store 层统一处理。
     items.sort(key=lambda item: item.total_cents, reverse=True)
     return items, sum(item.total_cents for item in items)
 
 
-def list_budgets(session: Session, month: str) -> list[BudgetORM]:
+def _row_to_budget(row: dict) -> BudgetRow:
+    """把 budgets 的一行转成 BudgetRow。"""
+    return BudgetRow(
+        id=row["id"],
+        month=row["period"],
+        category=row["category"] or "",
+        amount_cents=_to_cents(row["amount"]) or 0,
+        # threshold 可能为 NULL，缺省按 0.8 处理。
+        threshold=float(row["threshold"]) if row["threshold"] is not None else 0.8,
+    )
+
+
+def list_budgets(conn: Connection, month: str) -> list[BudgetRow]:
     """读取某个月的全部预算行。
 
     参数:
-        session: 请求级 Session。
         month: 月份，格式 YYYY-MM。
 
     返回:
-        BudgetORM 列表；排序（总预算在前）由 api/budgets.py 负责。
+        BudgetRow 列表；排序（总预算在前）由 api/budgets.py 负责。
     """
-    return list(session.scalars(select(BudgetORM).where(BudgetORM.month == month)))
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, period, category, amount, threshold FROM budgets WHERE period = %s",
+            (month,),
+        )
+        rows = cur.fetchall()
+    return [_row_to_budget(row) for row in rows]
 
 
 def upsert_budget(
-    session: Session,
+    conn: Connection,
     *,
     month: str,
     category: str,
     amount_cents: int,
-) -> BudgetORM:
-    """按 month + category 写入或更新一条预算。
+) -> BudgetRow:
+    """按 period + category 写入或更新一条预算。
 
     参数:
-        session: 请求级 Session。
-        month: 月份，格式 YYYY-MM。
+        month: 月份，格式 YYYY-MM，写入 period 列。
         category: 类别中文值；空字符串表示整月总预算。
         amount_cents: 预算金额，单位「分」，已由请求模型确保大于 0。
 
     返回:
-        commit + refresh 后的 ORM 行，包含自增 id。
+        落库后的 BudgetRow，包含自增 id。
     """
-    row = session.scalar(
-        select(BudgetORM).where(
-            BudgetORM.month == month,
-            BudgetORM.category == category,
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM budgets WHERE period = %s AND category = %s",
+            (month, category),
         )
-    )
-    now = datetime.now(UTC)
-    if row is None:
-        row = BudgetORM(
-            month=month,
-            category=category,
-            amount_cents=amount_cents,
-            updated_at=now,
+        existing = cur.fetchone()
+        if existing is None:
+            cur.execute(
+                "INSERT INTO budgets (period, category, amount) VALUES (%s, %s, %s)",
+                (month, category, _to_amount(amount_cents)),
+            )
+            budget_id = cur.lastrowid
+        else:
+            budget_id = existing["id"]
+            cur.execute(
+                "UPDATE budgets SET amount = %s WHERE id = %s",
+                (_to_amount(amount_cents), budget_id),
+            )
+        cur.execute(
+            "SELECT id, period, category, amount, threshold FROM budgets WHERE id = %s",
+            (budget_id,),
         )
-        session.add(row)
-    else:
-        row.amount_cents = amount_cents
-        row.updated_at = now
-    session.commit()
-    session.refresh(row)
-    return row
+        row = cur.fetchone()
+    conn.commit()
+    return _row_to_budget(row)
 
 
-def delete_budget(session: Session, budget_id: int) -> bool:
+def delete_budget(conn: Connection, budget_id: int) -> bool:
     """删除一条预算。
 
     返回:
         True 表示删除成功；False 表示 id 不存在。
     """
-    row = session.get(BudgetORM, budget_id)
-    if row is None:
-        return False
-    session.delete(row)
-    session.commit()
-    return True
+    with conn.cursor() as cur:
+        affected = cur.execute("DELETE FROM budgets WHERE id = %s", (budget_id,))
+    conn.commit()
+    return affected > 0

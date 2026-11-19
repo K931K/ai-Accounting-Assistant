@@ -10,7 +10,7 @@ from fastapi import APIRouter, Query
 
 from app import store
 from app.core.errors import VALIDATION_ERROR_RESPONSES
-from app.db import SessionDep
+from app.db import ConnDep
 from app.schemas.common import DateRangeQuery
 from app.schemas.stats import CategoryStat, CategoryStatsResponse
 
@@ -53,14 +53,14 @@ router = APIRouter(
 )
 def category_stats(
     params: Annotated[DateRangeQuery, Query()],
-    session: SessionDep,
+    conn: ConnDep,
 ) -> CategoryStatsResponse:
     """按类别汇总指定时间范围内的支出。
 
     参数:
         params: DateRangeQuery，包含可选的 from / to；两者都会转成 UTC，
                 且 from 不能晚于 to。
-        session: 请求级会话，交给 store.category_totals()。
+        conn: 请求级连接，交给 store.category_totals()。
 
     返回:
         CategoryStatsResponse：total_cents 是范围内总支出；
@@ -73,7 +73,7 @@ def category_stats(
         返回 CategoryTotal 列表和总金额；本函数只负责组装响应和计算 ratio。
     """
     items, total_cents = store.category_totals(
-        session,
+        conn,
         date_from=params.date_from,
         date_to=params.date_to,
     )
