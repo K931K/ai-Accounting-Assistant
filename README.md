@@ -61,6 +61,8 @@ ai-Accounting-Assistant/
 │   │   └── core/
 │   │       └── errors.py           # 统一错误结构与异常处理
 │   ├── export_openapi.py           # 导出 OpenAPI 契约
+│   ├── schema.sql                  # 建表脚本，应用启动时读取执行
+│   ├── sample.csv                  # 示例流水，可用 MySQL 客户端导入演示
 │   ├── requirements.txt
 │   ├── .env.example                # 环境变量示例
 │   └── Dockerfile

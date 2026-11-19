@@ -34,61 +34,32 @@ _DB_CONFIG = {
     "charset": "utf8mb4",
 }
 
-# 建表语句与 backend/schema.sql 保持一致；CREATE TABLE IF NOT EXISTS 可重复执行。
-# transaction_drafts 是「解析出草稿 → 用户确认后保存」流程用的中间表，
-# 保存时读取草稿的 source 并删除草稿，所以需要落库而不是放在内存里。
-_TABLE_STATEMENTS = (
+# 建表脚本：backend/schema.sql 是唯一的表结构来源，应用启动时读取并执行。
+# 脚本里的 create database / use 由代码跳过，库名统一走 DB_NAME。
+_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schema.sql"
+
+
+def _schema_statements() -> list[str]:
+    """把 schema.sql 拆成单条可执行语句。
+
+    只保留建表语句：create database 与 use 会按环境变量另做处理，
+    否则脚本里写死的 ledger 会覆盖 DB_NAME。
     """
-    CREATE TABLE IF NOT EXISTS transactions (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        amount DECIMAL(10, 2) NOT NULL,
-        currency VARCHAR(8) DEFAULT 'CNY',
-        merchant VARCHAR(30),
-        category VARCHAR(30),
-        occurred_at DATETIME NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        source VARCHAR(16) NOT NULL,
-        raw_input TEXT,
-        confidence DECIMAL(4, 2) DEFAULT 1.00,
-        status VARCHAR(16) DEFAULT 'confirmed',
-        note VARCHAR(200) NULL,
-        KEY ix_transactions_occurred (occurred_at),
-        KEY ix_transactions_category_occurred (category, occurred_at)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS categories (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        name VARCHAR(30) NOT NULL,
-        parent_id INT,
-        keywords VARCHAR(200)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS budgets (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        category VARCHAR(32) NOT NULL,
-        period VARCHAR(7) NOT NULL,
-        amount DECIMAL(10, 2) NOT NULL,
-        threshold DECIMAL(4, 2) DEFAULT 0.80,
-        UNIQUE KEY uq_budgets_period_category (period, category)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS transaction_drafts (
-        draft_id CHAR(32) PRIMARY KEY,
-        source VARCHAR(16) NOT NULL,
-        amount DECIMAL(10, 2) NULL,
-        merchant VARCHAR(30) NULL,
-        occurred_at DATETIME NULL,
-        category VARCHAR(30) NULL,
-        confidence DECIMAL(4, 2) NOT NULL DEFAULT 0.00,
-        missing_fields JSON NOT NULL,
-        raw_text TEXT NULL,
-        created_at DATETIME NOT NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """,
-)
+    raw = _SCHEMA_PATH.read_text(encoding="utf-8")
+    # 去掉整行注释，避免注释里的分号干扰拆分。
+    body = "\n".join(
+        line for line in raw.splitlines() if not line.strip().startswith("--")
+    )
+    statements: list[str] = []
+    for chunk in body.split(";"):
+        statement = chunk.strip()
+        if not statement:
+            continue
+        lowered = statement.lower()
+        if lowered.startswith("create database") or lowered.startswith("use "):
+            continue
+        statements.append(statement)
+    return statements
 
 
 def create_conn(*, with_database: bool = True) -> Connection:
@@ -193,7 +164,7 @@ def init_db() -> None:
     conn = create_conn()
     try:
         with conn.cursor() as cur:
-            for statement in _TABLE_STATEMENTS:
+            for statement in _schema_statements():
                 cur.execute(statement)
             _upgrade_schema(cur)
         conn.commit()

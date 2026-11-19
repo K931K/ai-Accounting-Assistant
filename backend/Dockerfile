@@ -17,6 +17,8 @@ ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 RUN pip install --no-cache-dir -i "$PIP_INDEX_URL" -r requirements.txt
 
 COPY app ./app
+# 建表脚本在运行时读取，必须一起进镜像。
+COPY schema.sql .
 
 EXPOSE 8000
 
