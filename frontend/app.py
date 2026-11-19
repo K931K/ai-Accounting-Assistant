@@ -528,6 +528,61 @@ def transactions_frame(items: list[dict]) -> pd.DataFrame:
     )
 
 
+def month_bounds(month: str) -> tuple[str, str]:
+    """把 YYYY-MM 换算成当月起止的 ISO 时间（东八区，含首尾）。"""
+    year, mon = (int(part) for part in month.split("-"))
+    start = date(year, mon, 1)
+    end = date(year + (mon // 12), mon % 12 + 1, 1) - timedelta(days=1)
+    return iso_at(start), iso_at(end, time(23, 59, 59))
+
+
+def previous_period(option: str) -> tuple[str | None, str | None]:
+    """上一个等长周期的起止时间，用于环比；不支持的选项返回 (None, None)。"""
+    if option == "本月":
+        return month_bounds(month_options(2)[1])
+    if option == "上月":
+        return month_bounds(month_options(3)[1])
+    if option == "近 30 天":
+        end = date.today() - timedelta(days=30)
+        start = end - timedelta(days=29)
+        return iso_at(start), iso_at(end, time(23, 59, 59))
+    return None, None
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def monthly_series(months: tuple[str, ...]) -> list[dict]:
+    """近若干个月的支出合计，供趋势图使用。
+
+    后端没有「按月汇总」的接口，这里按月各查一次 /stats/category；
+    结果按 120 秒缓存，切换页面或拖动表单不会反复打后端。
+    """
+    rows: list[dict] = []
+    for month in months:
+        start, end = month_bounds(month)
+        data = api_get("/stats/category", params={"from": start, "to": end})
+        rows.append(
+            {"月份": month[5:], "全月": month, "金额": to_yuan(data.get("total_cents", 0))}
+        )
+    return rows
+
+
+def export_csv(records: list[dict]) -> bytes:
+    """把明细导出成 CSV（带 BOM，Excel 直接打开不乱码）。"""
+    frame = pd.DataFrame(
+        [
+            {
+                "日期": fmt_local(row.get("occurred_at"), "%Y-%m-%d %H:%M"),
+                "商户": row.get("merchant") or "",
+                "类别": row.get("category") or "",
+                "金额(元)": to_yuan(row.get("amount_cents")),
+                "备注": row.get("note") or "",
+            }
+            for row in records
+        ]
+    )
+    return frame.to_csv(index=False).encode("utf-8-sig")
+
+
 def render_delete_transaction(items: list[dict]) -> None:
     """账单删除：先选一条，再二次确认，确认后调用后端 DELETE。"""
     if not items:
@@ -589,12 +644,57 @@ def render_stats_page() -> None:
 
     total_cents = stats.get("total_cents", 0)
     items = stats.get("items") or []
+    top = max(items, key=lambda i: i["total_cents"]) if items else None
+    count = sum(item["count"] for item in items)
+
+    # 环比：只对能算出上一等长周期的选项计算
+    delta = None
+    prev_from, prev_to = previous_period(option)
+    if prev_from and prev_to:
+        try:
+            prev_total = api_get(
+                "/stats/category", params={"from": prev_from, "to": prev_to}
+            ).get("total_cents", 0)
+        except ApiError:
+            prev_total = 0
+        if prev_total:
+            delta = f"{(total_cents - prev_total) / prev_total * 100:+.0f}% 环比"
+
     with st.container(border=True):
-        col_1, col_2, col_3 = st.columns(3)
-        col_1.metric("总支出", fmt_money(total_cents))
-        col_2.metric("类别数", f"{len(items)} 类")
-        top = max(items, key=lambda i: i["total_cents"]) if items else None
-        col_3.metric("最大类别", f"{top['category']} {fmt_money(top['total_cents'])}" if top else "-")
+        col_1, col_2, col_3, col_4 = st.columns(4)
+        col_1.metric("总支出", fmt_money(total_cents), delta=delta, delta_color="inverse")
+        col_2.metric("笔数", f"{count} 笔")
+        col_3.metric("类别数", f"{len(items)} 类")
+        col_4.metric(
+            "最大类别",
+            f"{top['category']} {fmt_money(top['total_cents'])}" if top else "-",
+        )
+
+    # 本月视图额外带上预算进度，和「预算管理」页呼应
+    if option == "本月":
+        try:
+            overview = api_get("/budgets", params={"month": month_options(1)[0]})
+        except ApiError:
+            overview = None
+        if overview:
+            budget_total = next(
+                (
+                    row["amount_cents"]
+                    for row in overview.get("items", [])
+                    if row.get("category") is None
+                ),
+                None,
+            )
+            spent = overview.get("spent_cents", 0)
+            if budget_total:
+                ratio = spent / budget_total
+                st.progress(
+                    min(ratio, 1.0),
+                    text=(
+                        f"本月总预算 {fmt_money(budget_total)}，已用 {ratio:.0%}，"
+                        f"剩余 {fmt_money(max(budget_total - spent, 0))}"
+                    ),
+                )
 
     if items:
         frame = pd.DataFrame(
@@ -644,6 +744,32 @@ def render_stats_page() -> None:
     else:
         st.info("这个时间范围内还没有账单。")
 
+    # ---------- 月度趋势 ----------
+    st.divider()
+    st.subheader("📈 近 6 个月支出趋势")
+    try:
+        series = monthly_series(tuple(month_options(6)[::-1]))
+    except ApiError as exc:
+        st.error(f"读取趋势失败：{exc.message}")
+        series = []
+    if series and any(row["金额"] for row in series):
+        trend_frame = pd.DataFrame(series)
+        st.altair_chart(
+            alt.Chart(trend_frame)
+            .mark_line(point=True, color="#3B82F6", strokeWidth=2)
+            .encode(
+                x=alt.X("月份:N", title=None, axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("金额:Q", title="支出（元）"),
+                tooltip=[
+                    alt.Tooltip("全月:N", title="月份"),
+                    alt.Tooltip("金额:Q", format=",.2f"),
+                ],
+            ),
+            use_container_width=True,
+        )
+    else:
+        st.info("最近 6 个月还没有支出记录。")
+
     # ---------- 账单明细 ----------
     st.divider()
     st.subheader("🧾 账单明细")
@@ -660,6 +786,13 @@ def render_stats_page() -> None:
     if records:
         st.dataframe(transactions_frame(records), width="stretch", hide_index=True)
         st.caption(f"共 {listing.get('total', len(records))} 条，当前展示最近 {len(records)} 条。")
+        st.download_button(
+            "⬇️ 导出 CSV",
+            export_csv(records),
+            file_name=f"账单_{date.today():%Y%m%d}.csv",
+            mime="text/csv",
+            key="export_csv_button",
+        )
         render_delete_transaction(records)
     else:
         st.info("还没有账单，先去「一句话记账」添加一笔。")
