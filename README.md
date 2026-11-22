@@ -1,4 +1,4 @@
-﻿# AI 记账助手（AI Accounting Assistant）
+# AI 记账助手（AI Accounting Assistant）
 
 广东金融学院第二十一组智能体项目。
 
@@ -101,6 +101,34 @@ uv pip install -r requirements.txt
 
 前端默认请求 `http://127.0.0.1:8000`，可用环境变量 `API_URL` 覆盖（例如后端换了端口时）。
 
+## 接入大模型
+
+文本模型与视觉模型分开配置，都写在 `backend/.env`：
+
+| 变量 | 作用 |
+|---|---|
+| `AI_PROVIDER` | `openai`=任意 OpenAI 兼容接口，`dify`=自建工作流 |
+| `AI_BASE_URL` / `AI_MODEL` / `AI_API_KEY` | 一句话记账与自然语言查账用的文本模型 |
+| `AI_VISION_MODEL` | 小票与支付截图识别用的视觉模型；留空表示不启用图片识别 |
+| `AI_VISION_BASE_URL` / `AI_VISION_API_KEY` | 视觉模型单独的地址与密钥；留空则复用文本模型那组 |
+| `AI_TIMEOUT` / `AI_RETRIES` | 单次调用超时（秒）与 429/5xx/超时的重试次数 |
+
+DeepSeek 的文本接口不带视觉能力，小票识别要另接一个支持图片输入的兼容服务
+（如通义 Qwen-VL、智谱 GLM-4V 的 OpenAI 兼容地址），把 `AI_VISION_BASE_URL`
+和 `AI_VISION_API_KEY` 单独填上即可。
+
+配置写好后先跑自检，不用启动服务：
+
+```powershell
+cd backend
+uv run python check_ai.py
+uv run python check_ai.py --image 小票.png
+```
+
+脚本依次验证一句话记账、自然语言查账、小票识别三条链路；`engine` 为 `llm` 表示模型真的通了，
+`rule` 表示调用失败后退回规则解析，具体原因看日志。服务运行时也可以查 `GET /ai/status`
+确认配置是否识别到。
+
 ## 待开发领域
 
 | 领域 | 当前状态 | 计划 |
@@ -110,6 +138,6 @@ uv pip install -r requirements.txt
 | 数据库 | 已接入 MySQL，启动时自动建库建表并补齐索引 | 补充迁移脚本，支持表结构调整与生产实例部署 |
 | Docker 部署 | Dockerfile 已准备 | 完成镜像构建、容器编排、环境变量与数据卷联调 |
 | AI 文本抽取 | 已接入大模型，输出 JSON 后统一校验；无密钥或调用失败退回规则 | 补抽取准确率评测集，按错误类型迭代提示词 |
-| 小票/图片识别 | 视觉模型抽取，未配置 `AI_VISION_MODEL` 时返回空草稿 | 补真实小票样本，验证金额与日期识别率 |
+| 小票/图片识别 | 视觉模型抽取，可与文本模型分开配置；未配置 `AI_VISION_MODEL` 时返回空草稿 | 补真实小票样本，验证金额与日期识别率 |
 | 自然语言查账 | 后端 `/query/parse`、`/query/ask`：问句转类别与时间区间并直接返回结果 | 前端已接入 `/query/ask`，支持快捷问题 |
 | 预算管理 | 后端已实现：按月设置总预算/类别预算并给出超支状态 | 前端预算页已接入，后续支持修改历史与提醒推送 |

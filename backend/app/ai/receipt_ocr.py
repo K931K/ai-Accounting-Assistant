@@ -65,7 +65,7 @@ def recognize(image: bytes, mime: str) -> ReceiptRecognition:
     返回:
         ReceiptRecognition：未识别字段为 None；engine 为 llm 或 none。
     """
-    if not llm.configured() or not llm.vision_model_name():
+    if not llm.vision_configured():
         return _empty()
 
     try:

@@ -58,7 +58,11 @@ def parse(question: str, now: datetime) -> QueryIntent:
         try:
             payload = llm.extract_json(
                 llm.TASK_QUERY,
-                _SYSTEM_PROMPT.format(now=now.astimezone(parsing.APP_TZ).isoformat(timespec="minutes")),
+                # 提示词里有 JSON 花括号，str.format 会把它当占位符，这里只做字符串替换。
+                _SYSTEM_PROMPT.replace(
+                    "{now}",
+                    now.astimezone(parsing.APP_TZ).isoformat(timespec="minutes"),
+                ),
                 question,
             )
             date_from, date_to = parsing.date_range(

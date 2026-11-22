@@ -37,4 +37,5 @@ class AiStatusResponse(BaseModel):
     provider: str = Field(..., description="openai=兼容接口，dify=工作流")
     model: str = Field(..., description="文本模型名")
     vision_model: str = Field(..., description="视觉模型名；空串表示未启用图片识别")
+    vision_configured: bool = Field(..., description="图片识别是否可用（模型名与密钥都齐全）")
     fallback: str = Field(..., description="不可用时的兜底方式")
