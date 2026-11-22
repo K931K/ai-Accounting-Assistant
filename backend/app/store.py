@@ -393,3 +393,115 @@ def delete_budget(conn: Connection, budget_id: int) -> bool:
         affected = cur.execute("DELETE FROM budgets WHERE id = %s", (budget_id,))
     conn.commit()
     return affected > 0
+
+
+@dataclass(frozen=True, slots=True)
+class ChatSession:
+    """chat_sessions 表的一行。
+
+    conversation_id 是 Dify 侧的会话标识，为空表示还没产生过对话。
+    """
+
+    session_id: str
+    conversation_id: str | None
+    created_at: datetime
+
+
+def _row_to_chat_session(row: dict) -> ChatSession:
+    """把数据库行转成 ChatSession，时间补回 UTC 时区。"""
+    return ChatSession(
+        session_id=row["session_id"],
+        conversation_id=row["dify_conversation_id"],
+        created_at=_from_db_datetime(row["created_at"]),
+    )
+
+
+def new_session_id() -> str:
+    """生成会话 id；与草稿 id 一样用 32 位十六进制，对应 char(32)。"""
+    return uuid4().hex
+
+
+def get_chat_session(conn: Connection, session_id: str) -> ChatSession | None:
+    """按 id 读会话；不存在返回 None。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT session_id, dify_conversation_id, created_at "
+            "FROM chat_sessions WHERE session_id = %s",
+            (session_id,),
+        )
+        row = cur.fetchone()
+    return _row_to_chat_session(row) if row else None
+
+
+def create_chat_session(conn: Connection, session_id: str | None = None) -> ChatSession:
+    """新建一条会话记录并提交。
+
+    参数:
+        session_id: 调用方指定的 id；为空时自动生成。
+    """
+    session_id = session_id or new_session_id()
+    now = datetime.now(UTC)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO chat_sessions (session_id, created_at, updated_at) "
+            "VALUES (%s, %s, %s)",
+            (session_id, _to_db_datetime(now), _to_db_datetime(now)),
+        )
+    conn.commit()
+    return ChatSession(session_id=session_id, conversation_id=None, created_at=now)
+
+
+def get_or_create_chat_session(conn: Connection, session_id: str | None) -> ChatSession:
+    """按 id 取会话，取不到就新建；前端不传 id 时也会得到一条新会话。"""
+    if session_id:
+        existing = get_chat_session(conn, session_id)
+        if existing:
+            return existing
+    return create_chat_session(conn, session_id)
+
+
+def set_chat_conversation_id(conn: Connection, session_id: str, conversation_id: str) -> None:
+    """保存 Dify 返回的 conversation_id，并刷新 updated_at。"""
+    now = _to_db_datetime(datetime.now(UTC))
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE chat_sessions SET dify_conversation_id = %s, updated_at = %s "
+            "WHERE session_id = %s",
+            (conversation_id, now, session_id),
+        )
+    conn.commit()
+
+
+def add_chat_message(conn: Connection, session_id: str, role: str, content: str) -> None:
+    """追加一条消息并刷新会话时间；role 由调用方保证是 user / assistant。"""
+    now = _to_db_datetime(datetime.now(UTC))
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO chat_messages (session_id, role, content, created_at) "
+            "VALUES (%s, %s, %s, %s)",
+            (session_id, role, content, now),
+        )
+        cur.execute(
+            "UPDATE chat_sessions SET updated_at = %s WHERE session_id = %s",
+            (now, session_id),
+        )
+    conn.commit()
+
+
+def list_chat_messages(conn: Connection, session_id: str, limit: int = 200) -> list[dict]:
+    """按时间正序返回最近 limit 条消息，供前端渲染会话历史。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT role, content, created_at FROM chat_messages "
+            "WHERE session_id = %s ORDER BY id DESC LIMIT %s",
+            (session_id, limit),
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "role": row["role"],
+            "content": row["content"],
+            "created_at": _from_db_datetime(row["created_at"]),
+        }
+        for row in reversed(rows)
+    ]

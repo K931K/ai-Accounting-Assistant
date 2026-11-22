@@ -56,3 +56,22 @@ create table if not exists transaction_drafts(
   raw_text text null,
   created_at datetime not null
 ) engine=InnoDB default charset=utf8mb4;
+
+-- 会话：智能助手的多轮上下文索引；
+-- dify_conversation_id 为空表示该会话还没调用过 Dify 对话应用。
+create table if not exists chat_sessions(
+  session_id char(32) primary key,
+  dify_conversation_id varchar(64) null,
+  created_at datetime not null,
+  updated_at datetime not null
+) engine=InnoDB default charset=utf8mb4;
+
+-- 会话消息：一轮轮对话按 id 递增记录，前端刷新后按时间正序回放。
+create table if not exists chat_messages(
+  id int auto_increment primary key,
+  session_id char(32) not null,
+  role varchar(16) not null,
+  content text not null,
+  created_at datetime not null,
+  key ix_chat_messages_session (session_id, id)
+) engine=InnoDB default charset=utf8mb4;

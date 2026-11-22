@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.ai import llm
-from app.api import budgets, query, receipts, stats, transactions
+from app.api import agent, budgets, query, receipts, stats, transactions
 from app.core.errors import register_error_handlers
 from app.db import init_db
 from app.schemas.meta import AiStatusResponse, CategoryOption, HealthResponse
@@ -50,6 +50,7 @@ app = FastAPI(
         {"name": "记账", "description": "解析、保存与查询账目"},
         {"name": "查账", "description": "自然语言提问，返回查询条件或直接给结果"},
         {"name": "小票识别", "description": "上传小票或支付截图，生成待确认的草稿"},
+        {"name": "智能助手", "description": "多轮对话：由 Dify 对话应用维护上下文，本地兜底单轮解析"},
         {"name": "统计", "description": "按类别汇总支出"},
         {"name": "预算", "description": "按月设置预算并判断是否接近或超出上限"},
         {"name": "元数据", "description": "类别下拉框等基础数据"},
@@ -81,6 +82,7 @@ app.include_router(query.router)
 app.include_router(receipts.router)
 app.include_router(stats.router)
 app.include_router(budgets.router)
+app.include_router(agent.router)
 
 
 #健康状态检查，后面docker正式部署后再改进，先设定返回版本号

@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 # 与 app/db.py 一致：按文件位置读 backend/.env，不受启动目录影响。
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
-from app.ai import llm, query_extract, receipt_ocr, text_extract  # noqa: E402
+from app.ai import dify, llm, query_extract, receipt_ocr, text_extract  # noqa: E402
 
 
 def _print_status() -> None:
@@ -34,6 +34,7 @@ def _print_status() -> None:
     print(f"文本模型         : {llm.model_name() if llm.configured() else '未配置'}")
     print(f"视觉模型         : {llm.vision_model_name() or '未配置'}")
     print(f"图片识别可用     : {'是' if llm.vision_configured() else '否'}")
+    print(f"多轮对话可用     : {'是' if llm.chat_configured() else '否（/agent/chat 走本地兜底）'}")
     print(f"超时 / 重试      : {llm.AI_TIMEOUT:g}s / {llm.AI_RETRIES} 次")
 
 
@@ -85,6 +86,19 @@ def _check_receipt(image_path: str) -> bool:
     return result.engine == "llm"
 
 
+def _check_chat() -> bool:
+    """用对话型应用跑一轮，确认多轮对话真的接通。"""
+    print("\n== 多轮对话 ==")
+    if not llm.chat_configured():
+        print("跳过：未配置 DIFY_CHAT_API_KEY，/agent/chat 会走本地兜底")
+        return True
+
+    result = dify.chat("你好，帮我看看这个月花了多少", None)
+    print(f"conversation_id: {result['conversation_id']}")
+    print(f"reply          : {result['answer'][:120]}")
+    return bool(result["answer"] and result["conversation_id"])
+
+
 def main() -> int:
     """按配置逐项自检，全部通过返回 0。"""
     parser = argparse.ArgumentParser(description="检查大模型接入是否可用")
@@ -95,17 +109,24 @@ def main() -> int:
 
     _print_status()
     if not llm.configured():
-        print("\n文本模型未配置：请在 backend/.env 填写 AI_API_KEY 后重跑。")
+        print("\n模型服务未配置：请在 backend/.env 填写 Dify 或 OpenAI 兼容接口的配置后重跑。")
         return 1
 
     text_ok = _check_text()
     query_ok = _check_query()
     receipt_ok = _check_receipt(args.image) if args.image else True
+    chat_ok = _check_chat()
 
     print("\n== 结论 ==")
-    for name, ok in (("一句话记账", text_ok), ("自然语言查账", query_ok), ("小票识别", receipt_ok)):
+    checks = (
+        ("一句话记账", text_ok),
+        ("自然语言查账", query_ok),
+        ("小票识别", receipt_ok),
+        ("多轮对话", chat_ok),
+    )
+    for name, ok in checks:
         print(f"{name}: {'通过' if ok else '失败（已退回规则，检查日志）'}")
-    return 0 if all((text_ok, query_ok, receipt_ok)) else 1
+    return 0 if all(ok for _, ok in checks) else 1
 
 
 if __name__ == "__main__":
