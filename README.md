@@ -1,4 +1,4 @@
-# AI 记账助手（AI Accounting Assistant）
+﻿# AI 记账助手（AI Accounting Assistant）
 
 广东金融学院第二十一组智能体项目。
 
@@ -26,7 +26,7 @@
 - 错误响应统一为 `{code, message, detail}`，参数校验、404、405 使用同一结构。
 - 已提供小票/支付截图上传接口：校验文件类型与大小后交给视觉模型抽取，未配置视觉模型时返回空草稿由用户补全。
 - 大模型走 OpenAI 兼容接口，也可切到 Dify 工作流；配置项见 `backend/.env.example`，接入状态可查 `GET /ai/status`。
-- Streamlit 前端位于 `frontend/`，单文件覆盖记账、查账、统计三个功能区；预算页待补充。
+- Streamlit 前端位于 `frontend/`，单文件覆盖记账、查账、统计、预算四个功能区。
 - OpenAPI 契约可由 `backend/export_openapi.py` 导出；服务启动后可访问 `/docs` 查看交互式接口文档。
 
 ## 项目结构
@@ -67,9 +67,8 @@ ai-Accounting-Assistant/
 │   ├── .env.example                # 环境变量示例
 │   └── Dockerfile
 ├── frontend/                       # 前端页面
-│   ├── app.py                      # 单文件页面：记账、查账、统计三个功能区（预算页待补充）
-│   ├── pyproject.toml              # 依赖声明（streamlit、pandas、altair、requests）
-│   └── uv.lock                     # 依赖锁定
+│   ├── app.py                      # 单文件页面：记账、查账、统计、预算四个功能区
+│   └── requirements.txt            # 依赖声明（streamlit、pandas、altair、requests）
 ├── docs/                           # 接口文档
 ├── pyproject.toml                  # 后端依赖声明
 └── uv.lock                         # 后端依赖锁定
@@ -106,11 +105,11 @@ uv pip install -r requirements.txt
 
 | 领域 | 当前状态 | 计划 |
 |---|---|---|
-| 前端（Streamlit） | 单文件实现记账、查账、统计三个功能区；查账已接入真实接口 | 补充预算页，优化交互细节 |
-| 账单删除 | 后端已提供 `DELETE /transactions/{id}`，前端暂未接入 | 前端改为调用删除接口并加二次确认 |
+| 前端（Streamlit） | 单文件实现记账、查账、统计、预算四个功能区；查账与删除已接入真实接口 | 优化交互细节 |
+| 账单删除 | 前端已调用 `DELETE /transactions/{id}`，删除前二次确认 | 支持批量删除与撤销 |
 | 数据库 | 已接入 MySQL，启动时自动建库建表并补齐索引 | 补充迁移脚本，支持表结构调整与生产实例部署 |
 | Docker 部署 | Dockerfile 已准备 | 完成镜像构建、容器编排、环境变量与数据卷联调 |
 | AI 文本抽取 | 已接入大模型，输出 JSON 后统一校验；无密钥或调用失败退回规则 | 补抽取准确率评测集，按错误类型迭代提示词 |
 | 小票/图片识别 | 视觉模型抽取，未配置 `AI_VISION_MODEL` 时返回空草稿 | 补真实小票样本，验证金额与日期识别率 |
-| 自然语言查账 | 后端 `/query/parse`、`/query/ask`：问句转类别与时间区间并直接返回结果 | 前端接入该接口，替换占位页 |
-| 预算管理 | 后端已实现：按月设置总预算/类别预算并给出超支状态 | 前端预算页待补充，后续支持修改历史与提醒推送 |
+| 自然语言查账 | 后端 `/query/parse`、`/query/ask`：问句转类别与时间区间并直接返回结果 | 前端已接入 `/query/ask`，支持快捷问题 |
+| 预算管理 | 后端已实现：按月设置总预算/类别预算并给出超支状态 | 前端预算页已接入，后续支持修改历史与提醒推送 |

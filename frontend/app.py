@@ -88,7 +88,8 @@ def _request(method: str, path: str, **kwargs):
 
     返回解析后的 JSON；204 无响应体时返回 None。
     """
-    timeout = kwargs.pop("timeout", 15)
+    # 默认 40s：后端调用大模型最多等 AI_TIMEOUT=20s，前端要留出网络与重试的余量。
+    timeout = kwargs.pop("timeout", 40)
     try:
         resp = requests.request(method, API_URL + path, timeout=timeout, **kwargs)
     except requests.RequestException as exc:
@@ -234,7 +235,10 @@ def apply_draft(draft: dict) -> None:
     st.session_state["draft_datetime"] = occurred
     st.session_state["form_money"] = to_yuan(draft.get("amount_cents"))
     st.session_state["form_merchant"] = draft.get("merchant") or ""
-    st.session_state["form_note"] = draft.get("raw_text") or ""
+    # 备注上限 200 字：一句话记账的原文就是一句备注，可以直接预填；
+    # 小票 OCR 原文可能上千字，超过上限就不塞进备注，改在预览区以原文形式展示。
+    raw_text = (draft.get("raw_text") or "").strip()
+    st.session_state["form_note"] = raw_text if len(raw_text) <= 200 else ""
     st.session_state["form_date"] = occurred.date() if occurred else date.today()
     category = draft.get("category")
     st.session_state["form_category"] = (
@@ -287,20 +291,38 @@ def render_draft_preview(draft: dict) -> None:
     elif engine == "rule":
         st.caption("当前由规则解析（未配置大模型），识别结果可能有偏差，请核对。")
 
+    # 原文超过备注上限时单独展开显示，保证小票识别出的文字不会丢。
+    raw_text = (draft.get("raw_text") or "").strip()
+    if raw_text and len(raw_text) > 200:
+        with st.expander("识别原文"):
+            st.text(raw_text)
+
     with st.form("save_transaction_form"):
         col_a, col_b = st.columns(2)
         with col_a:
             st.number_input(
-                "金额（元）", min_value=0.0, step=0.5, format="%.2f", key="form_money"
+                "金额（元）" + ("　⚠️ 未识别" if "amount_cents" in missing else ""),
+                min_value=0.0,
+                step=0.5,
+                format="%.2f",
+                key="form_money",
             )
             st.text_input(
                 "商户（必填）" + ("　⚠️ 未识别" if "merchant" in missing else ""),
                 key="form_merchant",
+                max_chars=30,
             )
         with col_b:
-            st.selectbox("消费类别", CATEGORIES, key="form_category")
-            st.date_input("消费日期", key="form_date")
-        st.text_input("备注", key="form_note")
+            st.selectbox(
+                "消费类别" + ("　⚠️ 未识别" if "category" in missing else ""),
+                CATEGORIES,
+                key="form_category",
+            )
+            st.date_input(
+                "消费日期" + ("　⚠️ 未识别" if "occurred_at" in missing else ""),
+                key="form_date",
+            )
+        st.text_input("备注", key="form_note", max_chars=200)
         submitted = st.form_submit_button("💾 保存账单", type="primary")
 
     if not submitted:
@@ -458,7 +480,7 @@ def render_query_page() -> None:
     items = answer.get("items") or []
     if items:
         st.subheader("明细")
-        st.dataframe(transactions_frame(items), use_container_width=True, hide_index=True)
+        st.dataframe(transactions_frame(items), width="stretch", hide_index=True)
 
 
 # ===================== 页面：统计 =====================
@@ -597,7 +619,7 @@ def render_stats_page() -> None:
                     color=alt.Color("类别:N", scale=color_scale, legend=None),
                     tooltip=["类别", alt.Tooltip("金额:Q", format=",.2f"), "笔数"],
                 ),
-                use_container_width=True,
+                width="stretch",
             )
         with col_pie:
             st.altair_chart(
@@ -616,7 +638,7 @@ def render_stats_page() -> None:
                         alt.Tooltip("占比:Q", format=".1%"),
                     ],
                 ),
-                use_container_width=True,
+                width="stretch",
             )
     else:
         st.info("这个时间范围内还没有账单。")
@@ -635,7 +657,7 @@ def render_stats_page() -> None:
 
     records = listing.get("items") or []
     if records:
-        st.dataframe(transactions_frame(records), use_container_width=True, hide_index=True)
+        st.dataframe(transactions_frame(records), width="stretch", hide_index=True)
         st.caption(f"共 {listing.get('total', len(records))} 条，当前展示最近 {len(records)} 条。")
         render_delete_transaction(records)
     else:
