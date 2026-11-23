@@ -105,6 +105,7 @@ def ai_status() -> AiStatusResponse:
         model=llm.model_name(),
         vision_model=llm.vision_model_name(),
         vision_configured=llm.vision_configured(),
+        missing_config=llm.missing_config(),
         fallback="规则解析（关键词 + 正则）",
     )
 

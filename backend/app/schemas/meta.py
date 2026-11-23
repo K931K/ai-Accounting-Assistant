@@ -38,4 +38,8 @@ class AiStatusResponse(BaseModel):
     model: str = Field(..., description="文本模型名")
     vision_model: str = Field(..., description="视觉模型名；空串表示未启用图片识别")
     vision_configured: bool = Field(..., description="图片识别是否可用（模型名与密钥都齐全）")
+    missing_config: list[str] = Field(
+        default_factory=list,
+        description="当前 provider 缺失的环境变量名；空列表表示配置齐全，AI 链路会真的走模型",
+    )
     fallback: str = Field(..., description="不可用时的兜底方式")

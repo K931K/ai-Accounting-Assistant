@@ -29,12 +29,14 @@ from app.ai import dify, llm, query_extract, receipt_ocr, text_extract  # noqa: 
 
 def _print_status() -> None:
     """打印当前模型配置，对应 GET /ai/status 的字段。"""
+    missing = llm.missing_config()
     print("== 模型配置 ==")
     print(f"provider        : {llm.provider()}")
     print(f"文本模型         : {llm.model_name() if llm.configured() else '未配置'}")
     print(f"视觉模型         : {llm.vision_model_name() or '未配置'}")
     print(f"图片识别可用     : {'是' if llm.vision_configured() else '否'}")
     print(f"多轮对话可用     : {'是' if llm.chat_configured() else '否（/agent/chat 走本地兜底）'}")
+    print(f"缺失的配置项     : {'、'.join(missing) if missing else '无'}")
     print(f"超时 / 重试      : {llm.AI_TIMEOUT:g}s / {llm.AI_RETRIES} 次")
 
 
@@ -109,7 +111,10 @@ def main() -> int:
 
     _print_status()
     if not llm.configured():
-        print("\n模型服务未配置：请在 backend/.env 填写 Dify 或 OpenAI 兼容接口的配置后重跑。")
+        print(f"\n模型服务未配置，缺少：{'、'.join(llm.missing_config())}。")
+        if llm.provider() == "dify":
+            print("没有 Dify 时也可以把 AI_PROVIDER 改成 openai，填 AI_API_KEY 走兼容接口。")
+        print("补齐后重跑；未配置期间三条 AI 链路都会退回规则解析。")
         return 1
 
     text_ok = _check_text()

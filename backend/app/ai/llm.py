@@ -40,6 +40,12 @@ TASK_TEXT = "text_extract"
 TASK_RECEIPT = "receipt_ocr"
 TASK_QUERY = "query_parse"
 
+# 各 provider 必需的配置项；未配置时接口直接走规则兜底，这里用于说清缺哪一项。
+_REQUIRED_ENV = {
+    "dify": ("DIFY_BASE_URL", "DIFY_API_KEY"),
+    "openai": ("AI_API_KEY",),
+}
+
 __all__ = [
     "AiUnavailable",
     "TASK_QUERY",
@@ -48,6 +54,7 @@ __all__ = [
     "chat_configured",
     "configured",
     "extract_json",
+    "missing_config",
     "model_name",
     "provider",
     "vision_configured",
@@ -75,6 +82,17 @@ def configured() -> bool:
     if provider() == "dify":
         return dify.configured()
     return bool(_api_key())
+
+
+def missing_config() -> list[str]:
+    """当前 provider 缺哪些环境变量，用于排障时指名道姓。
+
+    返回:
+        缺失的变量名列表；空列表表示配置齐全，AI 链路会真的走模型而不是规则。
+        只判断「有没有填」，不校验值是否有效，密钥写错由调用失败时的日志暴露。
+    """
+    names = _REQUIRED_ENV.get(provider(), _REQUIRED_ENV["openai"])
+    return [name for name in names if not os.getenv(name, "").strip()]
 
 
 def vision_configured() -> bool:
