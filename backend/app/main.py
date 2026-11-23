@@ -3,7 +3,7 @@
 1. 导入本模块时创建 app，注册 OpenAPI 元数据；
 2. FastAPI 启动 lifespan，调用 init_db() 创建缺失的表；
 3. 注册 CORS、统一异常处理器；
-4. 挂载 transactions / receipts / stats / budgets 四个路由；
+4. 挂载 transactions / query / receipts / stats / budgets / agent 六个路由；
 5. 直接定义 /health 和 /categories 两个基础接口。
 """
 

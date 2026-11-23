@@ -1,7 +1,8 @@
 """小票与支付截图上传接口。
 
 POST /receipts/parse 先做文件校验，再交给视觉模型抽取字段；
-未配置视觉模型时返回空草稿，前端根据 missing_fields 提示用户补全。
+识别不出的字段留在 missing_fields 里，前端据此提示用户补全；
+视觉模型不可用时返回全空草稿，上传功能本身不受影响。
 """
 
 from fastapi import APIRouter, File, UploadFile, status
@@ -68,15 +69,15 @@ def parse_receipt(
     conn: ConnDep,
     file: UploadFile = File(..., description="小票或支付截图"),
 ) -> TransactionDraft:
-    """校验上传文件，并写入 source=receipt 的空草稿。
+    """校验上传文件，识别字段后写入 source=receipt 的草稿。
 
     参数:
         conn: 请求级连接，交给 store.save_draft() 写入 transaction_drafts。
         file: multipart 字段名为 file；content_type 和文件大小在这里校验。
 
     返回:
-        TransactionDraft：amount_cents / merchant / occurred_at / category 全部为 None，
-        missing_fields 固定列出这四个字段，raw_text 为 None。
+        TransactionDraft：识别出的字段有值，识别不出的为 None 并列入 missing_fields；
+        视觉模型不可用或调用失败时四个字段全为 None、confidence 为 0。
 
     错误:
         ApiError 由 core/errors.py 的异常处理器转成 ErrorResponse：
@@ -105,7 +106,7 @@ def parse_receipt(
     if not content:
         raise ApiError(code="EMPTY_FILE", message="文件为空")
 
-    # 视觉模型抽取；未配置 AI_VISION_MODEL 时返回空结果，由前端提示用户手动补全。
+    # 视觉模型抽取；未配置视觉模型或调用失败时返回空结果，由前端提示用户手动补全。
     recognition = receipt_ocr.recognize(content, file.content_type or "image/png")
 
     draft = TransactionDraft(

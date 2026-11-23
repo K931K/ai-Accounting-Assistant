@@ -87,12 +87,13 @@ def _post(path: str, payload: dict, key: str) -> httpx.Response:
         raise AiUnavailable(f"Dify 拒绝请求：{exc.body[:200]}") from exc
 
 
-def upload_file(image: bytes, mime: str = "image/png") -> str:
+def upload_file(image: bytes, mime: str = "image/png", *, key: str = "") -> str:
     """把图片上传到 Dify，返回 upload_file_id。
 
     参数:
         image: 图片字节；大小与类型由接口层校验。
         mime: 图片 MIME，用于文件名后缀与 multipart 的 content-type。
+        key: 鉴权密钥；工作流与对话应用是不同应用时各自上传，留空回退到工作流密钥。
 
     返回:
         Dify 分配的 upload_file_id，供工作流或对话的 file 变量引用。
@@ -103,7 +104,7 @@ def upload_file(image: bytes, mime: str = "image/png") -> str:
             f"{base_url()}/v1/files/upload",
             {"user": _USER},
             files,
-            _headers(workflow_key()),
+            _headers(key or workflow_key()),
         )
     except BadRequest as exc:
         raise AiUnavailable(f"Dify 拒绝上传：{exc.body[:200]}") from exc
@@ -177,7 +178,7 @@ def chat(
         "conversation_id": conversation_id or "",
     }
     if image:
-        payload["files"] = [_file_payload(upload_file(image, mime))]
+        payload["files"] = [_file_payload(upload_file(image, mime, key=chat_key()))]
 
     resp = _post("/v1/chat-messages", payload, chat_key())
     try:
