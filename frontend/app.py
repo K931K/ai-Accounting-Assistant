@@ -537,13 +537,27 @@ def month_bounds(month: str) -> tuple[str, str]:
 
 
 def previous_period(option: str) -> tuple[str | None, str | None]:
-    """上一个等长周期的起止时间，用于环比；不支持的选项返回 (None, None)。"""
+    """上一个等长周期的起止时间，用于环比；不支持的选项返回 (None, None)。
+
+    「本月」页面统计的是月初到当天，对比基期也截到同一天数（上月没有这一天时
+    取月末），避免不足一个月和整月相减；「上月」是整月，对比前月整月。
+    """
+    today = date.today()
+    last_month_end = today.replace(day=1) - timedelta(days=1)
+    last_month_start = last_month_end.replace(day=1)
     if option == "本月":
-        return month_bounds(month_options(2)[1])
+        same_day = min(today.day, last_month_end.day)
+        return iso_at(last_month_start), iso_at(
+            last_month_end.replace(day=same_day), time(23, 59, 59)
+        )
     if option == "上月":
-        return month_bounds(month_options(3)[1])
+        prev_month_end = last_month_start - timedelta(days=1)
+        return (
+            iso_at(prev_month_end.replace(day=1)),
+            iso_at(prev_month_end, time(23, 59, 59)),
+        )
     if option == "近 30 天":
-        end = date.today() - timedelta(days=30)
+        end = today - timedelta(days=30)
         start = end - timedelta(days=29)
         return iso_at(start), iso_at(end, time(23, 59, 59))
     return None, None
