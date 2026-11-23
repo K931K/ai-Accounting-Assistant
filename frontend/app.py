@@ -536,6 +536,8 @@ def month_bounds(month: str) -> tuple[str, str]:
     return iso_at(start), iso_at(end, time(23, 59, 59))
 
 
+# 2026-11-23 bug修复：「上月」的环比基期误取上月本身，恒为 +0%；「本月」的基期取整月，
+# 与页面「月初到今天」的天数不等。两处都改为按上月同日推算基期。
 def previous_period(option: str) -> tuple[str | None, str | None]:
     """上一个等长周期的起止时间，用于环比；不支持的选项返回 (None, None)。
 
