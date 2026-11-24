@@ -7,6 +7,7 @@ llm.py（OpenAI 兼容接口）与 dify.py（工作流与对话应用）共用�
 其他 4xx 直接判定模型不可用。
 """
 
+import json
 import logging
 import os
 import time
@@ -17,6 +18,13 @@ logger = logging.getLogger(__name__)
 
 # 重试退避基数（秒），第 n 次重试等待 RETRY_BACKOFF * n。
 RETRY_BACKOFF = 0.8
+
+# 进程级连接池：每次请求重建 TLS 连接既慢，也容易被网关中途断开（SSL EOF / RST）。
+# httpx.Client 线程安全，FastAPI 的同步路由共用这一个即可；超时按请求传入，
+# 因此 AI_TIMEOUT 改了也不用重建。
+_client = httpx.Client(
+    limits=httpx.Limits(max_connections=8, max_keepalive_connections=4),
+)
 
 
 class AiUnavailable(Exception):
@@ -47,6 +55,30 @@ def retries() -> int:
     return int(os.getenv("AI_RETRIES", "2"))
 
 
+def extra_headers() -> dict[str, str]:
+    """环境变量 AI_EXTRA_HEADERS 里声明的附加请求头。
+
+    部分网关要靠自定义请求头做路由或会话关联，这类头与具体 provider 绑定，
+    放环境变量比写进代码更合适；值必须是 JSON 对象。
+
+    返回:
+        dict：请求头键值对；未配置、不是合法 JSON 或不是对象时返回空 dict，
+        调用方因此不需要区分「未配置」和「配置写错」。
+    """
+    raw = os.getenv("AI_EXTRA_HEADERS", "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("AI_EXTRA_HEADERS 不是合法 JSON，本次不附加请求头")
+        return {}
+    if not isinstance(data, dict):
+        logger.warning("AI_EXTRA_HEADERS 必须是 JSON 对象，本次不附加请求头")
+        return {}
+    return {str(key): str(value) for key, value in data.items()}
+
+
 def _post(
     url: str,
     *,
@@ -56,12 +88,14 @@ def _post(
     files: dict | None = None,
 ) -> httpx.Response:
     """发送 POST 并按状态码决定重试、降级还是判不可用。"""
+    # 附加请求头放前面，让调用方显式传的 Authorization 等保持优先。
+    request_headers = {**extra_headers(), **headers}
     last_error = ""
     for attempt in range(retries() + 1):
         try:
-            resp = httpx.post(
+            resp = _client.post(
                 url,
-                headers=headers,
+                headers=request_headers,
                 json=json_body,
                 data=data,
                 files=files,

@@ -25,9 +25,13 @@ class ChatResponse(BaseModel):
     """POST /agent/chat 的响应。"""
 
     session_id: str = Field(..., description="会话 id，下一轮原样带回")
-    conversation_id: str | None = Field(None, description="Dify 会话 id；本地兜底时为空")
+    conversation_id: str | None = Field(
+        None, description="Dify 会话 id；兼容接口多轮与本地兜底时为空"
+    )
     reply: str = Field(..., description="助手回复")
-    engine: str = Field(..., description="dify=对话应用，local=本地兜底")
+    engine: str = Field(
+        ..., description="dify=Dify 对话应用，llm=兼容接口按历史生成，local=本地兜底"
+    )
 
 
 class ChatMessage(BaseModel):

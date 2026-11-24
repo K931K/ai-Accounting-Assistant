@@ -89,16 +89,24 @@ def _check_receipt(image_path: str) -> bool:
 
 
 def _check_chat() -> bool:
-    """用对话型应用跑一轮，确认多轮对话真的接通。"""
+    """用对话链路跑一轮，确认多轮对话真的接通。"""
     print("\n== 多轮对话 ==")
     if not llm.chat_configured():
-        print("跳过：未配置 DIFY_CHAT_API_KEY，/agent/chat 会走本地兜底")
+        print("跳过：未配置对话链路，/agent/chat 会走本地兜底")
         return True
 
-    result = dify.chat("你好，帮我看看这个月花了多少", None)
-    print(f"conversation_id: {result['conversation_id']}")
-    print(f"reply          : {result['answer'][:120]}")
-    return bool(result["answer"] and result["conversation_id"])
+    if llm.provider() == "dify":
+        result = dify.chat("你好，帮我看看这个月花了多少", None)
+        print(f"conversation_id: {result['conversation_id']}")
+        print(f"reply          : {result['answer'][:120]}")
+        return bool(result["answer"] and result["conversation_id"])
+
+    answer = llm.chat(
+        "你是记账助手，用一句中文回答。",
+        [{"role": "user", "content": "你好，你能帮我做什么？"}],
+    )
+    print(f"reply          : {answer[:120]}")
+    return bool(answer)
 
 
 def main() -> int:

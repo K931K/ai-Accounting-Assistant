@@ -20,6 +20,7 @@ import re
 import time
 from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 
 from app.ai import dify, transport
@@ -51,6 +52,7 @@ __all__ = [
     "TASK_QUERY",
     "TASK_RECEIPT",
     "TASK_TEXT",
+    "chat",
     "chat_configured",
     "configured",
     "extract_json",
@@ -62,9 +64,27 @@ __all__ = [
 ]
 
 
+# 单次请求的输出上限。思考型模型先消耗思考 token 再输出正文，
+# 800 这种小上限容易被思考占满、正文为空，这里留够余量。
+MAX_TOKENS = 2000
+
+# 网关不认识的可选字段：遇到 400 时按这个顺序逐个去掉重试。
+_OPTIONAL_FIELDS = ("response_format", "thinking")
+
+
 def provider() -> str:
     """当前 provider，取值 dify 或 openai。"""
     return os.getenv("AI_PROVIDER", "dify").strip().lower()
+
+
+def _thinking_disabled() -> bool:
+    """AI_THINKING=off 时是否要求模型跳过思考。
+
+    字段抽取和意图解析都是短任务，思考过程只会多花 token 与等待时间；
+    该开关发的是 DeepSeek 系接口的 thinking 字段，其他网关若返回 400
+    会被 _post_chat() 自动去掉后重试，不影响正常调用。
+    """
+    return os.getenv("AI_THINKING", "").strip().lower() in {"off", "false", "0", "disabled"}
 
 
 def _api_key() -> str:
@@ -106,8 +126,10 @@ def vision_configured() -> bool:
 
 
 def chat_configured() -> bool:
-    """多轮对话是否可用；目前只有 Dify 对话型应用支持。"""
-    return provider() == "dify" and dify.chat_configured()
+    """多轮对话是否可用：Dify 对话应用，或已配置密钥的 OpenAI 兼容接口。"""
+    if provider() == "dify":
+        return dify.chat_configured()
+    return bool(_api_key())
 
 
 def model_name() -> str:
@@ -157,6 +179,45 @@ def _to_data_url(image: bytes, mime: str) -> str:
     return f"data:{mime};base64,{encoded}"
 
 
+def _post_chat(url: str, payload: dict, headers: dict[str, str]) -> httpx.Response:
+    """发送 /chat/completions 请求，400 时按可选字段逐个去掉后重试。
+
+    不同网关对 response_format、thinking 这类可选字段的接受程度不一样，
+    400 基本就是「不认识这个字段」；去掉再试一次，比直接判模型不可用划算。
+    """
+    while True:
+        try:
+            return transport.post_json(url, payload, headers)
+        except transport.BadRequest as exc:
+            dropped = next(
+                (name for name in _OPTIONAL_FIELDS if name in payload and name in exc.body),
+                None,
+            )
+            if dropped is None:
+                raise AiUnavailable(f"模型服务拒绝请求：{exc.body[:200]}") from exc
+            logger.warning("网关不支持 %s，去掉后重试：%s", dropped, exc.body[:120])
+            payload.pop(dropped, None)
+
+
+def _response_text(resp: httpx.Response) -> str:
+    """取 /chat/completions 响应里的正文，空正文视为模型不可用。
+
+    思考型模型先输出 reasoning_content 再给 content，输出上限被思考占满时
+    content 是空串；这种时候不能把思考过程当结果用，只能判定本次调用失败。
+    """
+    try:
+        choice = resp.json()["choices"][0]
+        content = (choice.get("message") or {}).get("content")
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise AiUnavailable("模型响应缺少 choices 内容") from exc
+    if not isinstance(content, str) or not content.strip():
+        raise AiUnavailable(
+            "模型没有返回正文（finish_reason="
+            f"{choice.get('finish_reason')}），可调大 max_tokens 或设置 AI_THINKING=off"
+        )
+    return content
+
+
 def _call_openai(system: str, user: str, model: str, image: bytes, mime: str) -> str:
     """调用 OpenAI 兼容的 /chat/completions，返回模型输出的文本。
 
@@ -175,37 +236,65 @@ def _call_openai(system: str, user: str, model: str, image: bytes, mime: str) ->
         api_key = _api_key()
         content = user
 
-    payload = {
+    payload: dict = {
         "model": model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": content},
         ],
         "temperature": 0.2,
-        "max_tokens": 800,
-        # 兼容服务大多支持 JSON 模式；个别网关不认这个字段，下面会降级重试。
+        "max_tokens": MAX_TOKENS,
+        # 兼容服务大多支持 JSON 模式；个别网关不认这个字段，_post_chat 会降级重试。
         "response_format": {"type": "json_object"},
     }
+    if _thinking_disabled():
+        payload["thinking"] = {"type": "disabled"}
+
     headers = {"Authorization": f"Bearer {api_key}"}
-    url = f"{base_url}/chat/completions"
+    resp = _post_chat(f"{base_url}/chat/completions", payload, headers)
+    return _response_text(resp)
 
-    try:
-        resp = transport.post_json(url, payload, headers)
-    except transport.BadRequest as exc:
-        if "response_format" not in exc.body:
-            raise AiUnavailable(f"模型服务拒绝请求：{exc.body[:200]}") from exc
-        # 网关不支持 response_format：去掉该字段重试一次，提示词里已经要求 JSON。
-        logger.warning("网关不支持 response_format，去掉后重试：%s", exc.body[:120])
-        payload.pop("response_format", None)
-        try:
-            resp = transport.post_json(url, payload, headers)
-        except transport.BadRequest as retry_exc:
-            raise AiUnavailable(f"模型服务拒绝请求：{retry_exc.body[:200]}") from retry_exc
 
-    try:
-        return resp.json()["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
-        raise AiUnavailable("模型响应缺少 choices 内容") from exc
+def chat(system: str, messages: list[dict[str, str]]) -> str:
+    """按完整消息列表调用文本模型，返回助手回复正文。
+
+    参数:
+        system: 系统提示，约束助手的角色与边界。
+        messages: 历史消息，元素为 {"role": "user"|"assistant", "content": str}，按时间正序；
+            最后一条应当是本次用户输入。
+
+    返回:
+        str：模型回复正文，不是 JSON。
+
+    异常:
+        AiUnavailable：未配置、请求失败或返回正文为空，调用方应走本地兜底。
+    """
+    if not configured():
+        raise AiUnavailable("未配置模型服务")
+
+    payload: dict = {
+        "model": model_name(),
+        "messages": [{"role": "system", "content": system}, *messages],
+        "temperature": 0.3,
+        "max_tokens": MAX_TOKENS,
+    }
+    if _thinking_disabled():
+        payload["thinking"] = {"type": "disabled"}
+
+    started = time.perf_counter()
+    resp = _post_chat(
+        f"{_base_url()}/chat/completions",
+        payload,
+        {"Authorization": f"Bearer {_api_key()}"},
+    )
+    answer = _response_text(resp).strip()
+    logger.info(
+        "多轮对话完成 provider=openai model=%s 轮数=%s 耗时=%.2fs",
+        payload["model"],
+        len(messages),
+        time.perf_counter() - started,
+    )
+    return answer
 
 
 def extract_json(

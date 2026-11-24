@@ -1057,6 +1057,8 @@ def _send_chat(message: str) -> None:
         st.error(f"助手暂时不可用：{exc.message}")
         return
     st.session_state["chat_session_id"] = answer["session_id"]
+    # 记录本轮由谁生成，页面上据此显示对话链路
+    st.session_state["chat_engine"] = answer.get("engine")
     st.rerun()
 
 
@@ -1064,10 +1066,10 @@ def render_assistant_page() -> None:
     """页面 5：多轮对话。
 
     历史消息以后端为准，每次渲染都从 /agent/sessions/{id} 拉取，
-    这样刷新页面、换设备都能接着聊；Dify 未配置时后端退化为本地单轮解析。
+    这样刷新页面、换设备都能接着聊；后端按可用性选择 Dify、兼容接口或本地兜底。
     """
     st.header("💬 智能助手")
-    st.caption("多轮对话：上下文由后端交给 Dify 维护；未配置 Dify 时退回本地单轮解析。")
+    st.caption("多轮对话：历史消息由后端保存并随每次请求带给模型；未配置模型时退回本地单轮解析。")
 
     session_id = st.session_state.get("chat_session_id")
     data = None
@@ -1080,13 +1082,22 @@ def render_assistant_page() -> None:
             session_id = None
 
     messages = (data or {}).get("messages") or []
-    connected = bool((data or {}).get("conversation_id"))
+    # 历史接口只给 conversation_id，能确认是 Dify；其余链路靠本轮响应里的 engine
+    engine = st.session_state.get("chat_engine") or (
+        "dify" if (data or {}).get("conversation_id") else None
+    )
+    engine_label = {
+        "dify": "Dify 对话已接通",
+        "llm": "大模型对话已接通（历史由后端维护）",
+        "local": "本地解析模式（对话模型不可用）",
+    }.get(engine or "", "")
 
     if messages:
         for item in messages:
             with st.chat_message(item["role"]):
                 st.markdown(item["content"])
-        st.caption("Dify 对话已接通" if connected else "本地解析模式（Dify 对话应用未配置）")
+        if engine_label:
+            st.caption(engine_label)
     else:
         st.info("先打个招呼，或者点下面的示例开始。")
         cols = st.columns(len(CHAT_STARTERS))

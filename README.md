@@ -26,7 +26,8 @@
 - 错误响应统一为 `{code, message, detail}`，参数校验、404、405 使用同一结构。
 - 已提供小票/支付截图上传接口：校验文件类型与大小后交给视觉模型抽取，未配置视觉模型时返回空草稿由用户补全。
 - 大模型走 OpenAI 兼容接口，也可切到 Dify 工作流；配置项见 `backend/.env.example`，接入状态可查 `GET /ai/status`。
-- Streamlit 前端位于 `frontend/`，单文件覆盖记账、查账、统计、预算四个功能区。
+- 智能助手支持多轮对话：Dify 对话应用或兼容接口（历史由后端保存并随请求带上），都不可用时退回本地单轮解析。
+- Streamlit 前端位于 `frontend/`，覆盖记账、查账、统计、预算与智能助手五个功能区。
 - OpenAPI 契约可由 `backend/export_openapi.py` 导出；服务启动后可访问 `/docs` 查看交互式接口文档。
 
 ## 项目结构
@@ -108,14 +109,16 @@ uv pip install -r requirements.txt
 | 变量 | 作用 |
 |---|---|
 | `AI_PROVIDER` | `openai`=任意 OpenAI 兼容接口，`dify`=自建工作流 |
-| `AI_BASE_URL` / `AI_MODEL` / `AI_API_KEY` | 一句话记账与自然语言查账用的文本模型 |
+| `AI_BASE_URL` / `AI_MODEL` / `AI_API_KEY` | 一句话记账、自然语言查账与多轮对话用的文本模型 |
 | `AI_VISION_MODEL` | 小票与支付截图识别用的视觉模型；留空表示不启用图片识别 |
 | `AI_VISION_BASE_URL` / `AI_VISION_API_KEY` | 视觉模型单独的地址与密钥；留空则复用文本模型那组 |
 | `AI_TIMEOUT` / `AI_RETRIES` | 单次调用超时（秒）与 429/5xx/超时的重试次数 |
+| `AI_THINKING` | 思考型模型的思考开关，`off` 跳过思考以提速省 token；留空用服务端默认 |
+| `AI_EXTRA_HEADERS` | 附加请求头的 JSON 对象，网关要求自定义头（如会话头）时用 |
 
-DeepSeek 的文本接口不带视觉能力，小票识别要另接一个支持图片输入的兼容服务
-（如通义 Qwen-VL、智谱 GLM-4V 的 OpenAI 兼容地址），把 `AI_VISION_BASE_URL`
-和 `AI_VISION_API_KEY` 单独填上即可。
+小票识别要模型支持图片输入：文本模型本身是多模态的（如 `deepseek-v4.1-flash`）时，
+`AI_VISION_MODEL` 填同一个模型名、地址与密钥留空即可复用；文本模型不带视觉能力时，
+再单独填 `AI_VISION_BASE_URL` 和 `AI_VISION_API_KEY` 指向另一个兼容服务。
 
 配置写好后先跑自检，不用启动服务：
 
@@ -126,7 +129,7 @@ uv run python check_ai.py --image 小票.png
 ```
 
 脚本依次验证一句话记账、自然语言查账、小票识别、多轮对话四条链路；`engine` 为 `llm`
-（对话为 `dify`）表示模型真的通了，`rule`（对话为 `local`）表示调用失败后退回规则解析，
+（对话走 Dify 时为 `dify`）表示模型真的通了，`rule`（对话为 `local`）表示调用失败后退回规则解析，
 具体原因看日志。服务运行时也可以查 `GET /ai/status`：`missing_config` 直接列出还缺哪些
 环境变量，为空才说明 AI 链路真的走模型，否则三条抽取链路都会（静默地）退回规则解析。
 
@@ -134,7 +137,7 @@ uv run python check_ai.py --image 小票.png
 
 | 领域 | 当前状态 | 计划 |
 |---|---|---|
-| 前端（Streamlit） | 单文件实现记账、查账、统计、预算四个功能区；查账与删除已接入真实接口 | 优化交互细节 |
+| 前端（Streamlit） | 单文件实现记账、查账、统计、预算与智能助手五个功能区；查账与删除已接入真实接口 | 优化交互细节 |
 | 账单删除 | 前端已调用 `DELETE /transactions/{id}`，删除前二次确认 | 支持批量删除与撤销 |
 | 数据库 | 已接入 MySQL，启动时自动建库建表并补齐索引 | 补充迁移脚本，支持表结构调整与生产实例部署 |
 | Docker 部署 | Dockerfile 已准备 | 完成镜像构建、容器编排、环境变量与数据卷联调 |
