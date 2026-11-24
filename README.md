@@ -108,15 +108,14 @@ uv pip install -r requirements.txt
 
 | 变量 | 作用 |
 |---|---|
-| `AI_PROVIDER` | `openai`=任意 OpenAI 兼容接口，`dify`=自建工作流 |
+| `AI_PROVIDER` | `openai`=任意 OpenAI 兼容接口（默认 DeepSeek 官方），`dify`=自建工作流 |
 | `AI_BASE_URL` / `AI_MODEL` / `AI_API_KEY` | 一句话记账、自然语言查账与多轮对话用的文本模型 |
 | `AI_VISION_MODEL` | 小票与支付截图识别用的视觉模型；留空表示不启用图片识别 |
 | `AI_VISION_BASE_URL` / `AI_VISION_API_KEY` | 视觉模型单独的地址与密钥；留空则复用文本模型那组 |
 | `AI_TIMEOUT` / `AI_RETRIES` | 单次调用超时（秒）与 429/5xx/超时的重试次数 |
-| `AI_THINKING` | 思考型模型的思考开关，`off` 跳过思考以提速省 token；留空用服务端默认 |
-| `AI_EXTRA_HEADERS` | 附加请求头的 JSON 对象，网关要求自定义头（如会话头）时用 |
+| `AI_THINKING` | DeepSeek 思考型模型的思考开关，`off` 跳过思考以提速省 token；留空用服务端默认 |
 
-小票识别要模型支持图片输入：文本模型本身是多模态的（如 `deepseek-v4.1-flash`）时，
+小票识别要模型支持图片输入：文本模型本身是多模态的（如 `deepseek-flash`）时，
 `AI_VISION_MODEL` 填同一个模型名、地址与密钥留空即可复用；文本模型不带视觉能力时，
 再单独填 `AI_VISION_BASE_URL` 和 `AI_VISION_API_KEY` 指向另一个兼容服务。
 

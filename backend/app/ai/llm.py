@@ -1,14 +1,15 @@
 """大模型调用入口：Dify 优先，OpenAI 兼容接口作为备选。
 
-对外只暴露 extract_json()：给任务名、系统提示和用户输入，返回模型输出的 dict。
-字段校验和兜底在调用方（text_extract / receipt_ocr / query_extract）处理。
+对外暴露两个函数：
+- extract_json()：给任务名、系统提示和用户输入，返回模型输出的 dict；
+- chat()：给系统提示和历史消息，返回助手的回复正文。
+字段校验和兜底在调用方（text_extract / receipt_ocr / query_extract / agent）处理。
 
 配置全在环境变量里，见 backend/.env.example：
+- AI_PROVIDER=openai 时走任意 OpenAI 兼容服务的 /chat/completions（默认 DeepSeek 官方接口）；
+  文本模型与视觉模型可以分开配置：AI_VISION_BASE_URL / AI_VISION_API_KEY 留空时复用文本模型；
 - AI_PROVIDER=dify 时走 Dify：三条抽取任务各对应一个工作流（DIFY_WORKFLOW_*），
-  图片先上传再作为 file 变量传入；多轮对话走 /v1/chat-messages（见 app.ai.dify）；
-- AI_PROVIDER=openai 时走任意 OpenAI 兼容服务的 /chat/completions；
-- 文本模型与视觉模型可以分开配置：AI_VISION_BASE_URL / AI_VISION_API_KEY
-  留空时复用文本模型那一组。
+  图片先上传再作为 file 变量传入；多轮对话走 /v1/chat-messages（见 app.ai.dify）。
 未配置密钥时 configured() 为 False，调用方直接走规则兜底。
 """
 
@@ -68,7 +69,7 @@ __all__ = [
 # 800 这种小上限容易被思考占满、正文为空，这里留够余量。
 MAX_TOKENS = 2000
 
-# 网关不认识的可选字段：遇到 400 时按这个顺序逐个去掉重试。
+# OpenAI 兼容服务未必都认这些可选字段：遇到 400 时按顺序逐个去掉重试。
 _OPTIONAL_FIELDS = ("response_format", "thinking")
 
 
@@ -80,9 +81,9 @@ def provider() -> str:
 def _thinking_disabled() -> bool:
     """AI_THINKING=off 时是否要求模型跳过思考。
 
-    字段抽取和意图解析都是短任务，思考过程只会多花 token 与等待时间；
-    该开关发的是 DeepSeek 系接口的 thinking 字段，其他网关若返回 400
-    会被 _post_chat() 自动去掉后重试，不影响正常调用。
+    字段抽取和意图解析都是短任务，思考过程只会多花 token 与等待时间。
+    发的是 DeepSeek 系接口的 thinking 字段；服务端不认这个字段返回 400 时，
+    _post_chat() 会去掉它重试，不影响其他兼容服务。
     """
     return os.getenv("AI_THINKING", "").strip().lower() in {"off", "false", "0", "disabled"}
 
@@ -182,7 +183,7 @@ def _to_data_url(image: bytes, mime: str) -> str:
 def _post_chat(url: str, payload: dict, headers: dict[str, str]) -> httpx.Response:
     """发送 /chat/completions 请求，400 时按可选字段逐个去掉后重试。
 
-    不同网关对 response_format、thinking 这类可选字段的接受程度不一样，
+    不同兼容服务对 response_format、thinking 这类可选字段的接受程度不一样，
     400 基本就是「不认识这个字段」；去掉再试一次，比直接判模型不可用划算。
     """
     while True:
@@ -195,7 +196,7 @@ def _post_chat(url: str, payload: dict, headers: dict[str, str]) -> httpx.Respon
             )
             if dropped is None:
                 raise AiUnavailable(f"模型服务拒绝请求：{exc.body[:200]}") from exc
-            logger.warning("网关不支持 %s，去掉后重试：%s", dropped, exc.body[:120])
+            logger.warning("服务端不支持 %s，去掉后重试：%s", dropped, exc.body[:120])
             payload.pop(dropped, None)
 
 
@@ -244,7 +245,7 @@ def _call_openai(system: str, user: str, model: str, image: bytes, mime: str) ->
         ],
         "temperature": 0.2,
         "max_tokens": MAX_TOKENS,
-        # 兼容服务大多支持 JSON 模式；个别网关不认这个字段，_post_chat 会降级重试。
+        # 兼容服务大多支持 JSON 模式；个别服务不认这个字段，_post_chat 会降级重试。
         "response_format": {"type": "json_object"},
     }
     if _thinking_disabled():
