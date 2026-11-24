@@ -67,6 +67,98 @@ FORM_DEFAULTS = {
     "form_note": "",
 }
 
+APP_VERSION = "v0.1.0"
+
+# 界面样式：主题色在 .streamlit/config.toml 里定，这里只做组件级微调。
+# 选择器全部基于 data-testid，不依赖 Streamlit 内部类名，升级时更稳。
+APP_CSS = """
+<style>
+/* 顶部工具栏与页脚：隐藏 Deploy、GitHub 等与演示无关的入口 */
+[data-testid="stToolbar"] {display: none;}
+footer {visibility: hidden;}
+
+/* 内容区留白：宽屏下不让正文铺满，读起来更舒服 */
+.block-container {
+  padding-top: 2.6rem;
+  padding-bottom: 3rem;
+  max-width: 1180px;
+}
+
+/* 侧边栏：白底 + 细分隔线，和主内容区分开 */
+section[data-testid="stSidebar"] {
+  background: #FFFFFF;
+  border-right: 1px solid #E6E8F0;
+}
+section[data-testid="stSidebar"] .block-container {padding-top: 1.2rem;}
+
+/* 侧边栏导航：把单选组做成列表项的样子 */
+section[data-testid="stSidebar"] div[role="radiogroup"] label {
+  padding: 7px 10px;
+  border-radius: 10px;
+  transition: background 0.15s ease;
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] label:hover {
+  background: #EEF1FA;
+}
+
+/* 卡片：st.container(border=True) 用白底 + 圆角，和浅灰页面背景拉开层次 */
+div[data-testid="stVerticalBlockBorderWrapper"] > div {
+  background: #FFFFFF;
+  border-radius: 14px;
+}
+
+/* 指标卡：白底、圆角、极浅阴影 */
+div[data-testid="stMetric"] {
+  background: #FFFFFF;
+  border: 1px solid #E6E8F0;
+  border-radius: 14px;
+  padding: 14px 18px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+/* 按钮与下载按钮：统一圆角与字重 */
+.stButton > button, .stDownloadButton > button {
+  border-radius: 10px;
+  font-weight: 500;
+}
+
+/* 进度条与提示块圆角，和卡片保持一致 */
+div[data-testid="stProgress"] > div > div > div {border-radius: 6px;}
+div[data-testid="stAlert"] {border-radius: 12px;}
+
+/* 表格外框圆角，避免直角边框显得生硬 */
+div[data-testid="stDataFrame"] {
+  border: 1px solid #E6E8F0;
+  border-radius: 12px;
+  overflow: hidden;
+}
+</style>
+"""
+
+
+def inject_styles() -> None:
+    """注入全局样式；每次渲染调用一次即可。"""
+    st.markdown(APP_CSS, unsafe_allow_html=True)
+
+
+def empty_state(icon: str, title: str, hint: str) -> None:
+    """统一的空状态占位：图标 + 标题 + 一句引导。
+
+    比 st.info 更醒目，也避免每个页面各写一套文案。
+    """
+    st.markdown(
+        f"""
+        <div style="text-align:center;padding:34px 16px;border:1px dashed #D7DBE7;
+                    border-radius:14px;background:#FBFCFE;">
+          <div style="font-size:30px;line-height:1.2">{icon}</div>
+          <div style="font-weight:600;margin-top:8px;color:#1F2430">{title}</div>
+          <div style="color:#7A8299;font-size:13px;margin-top:4px">{hint}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 
 # ===================== 接口访问层 =====================
 
@@ -392,7 +484,7 @@ def render_record_page() -> None:
         render_draft_preview(draft)
     else:
         st.divider()
-        st.info("识别结果会显示在这里：金额、商户、类别、日期都可以手动改。")
+        empty_state("🧾", "还没有解析结果", "输入一句消费描述或上传小票，识别后会显示在这里")
 
 
 # ===================== 页面：查账 =====================
@@ -451,32 +543,29 @@ def render_query_page() -> None:
     answer = st.session_state.get("query_result")
     st.divider()
     if not answer:
-        st.info("结果会显示在这里：结论、合计金额、命中笔数，以及明细列表。")
+        empty_state("💡", "还没有查询结果", "输入问题或点上面的示例，结果会显示在这里")
         return
 
     st.subheader("结论")
     st.markdown(f"### {answer.get('answer', '-')}")
 
-    col_1, col_2, col_3, col_4 = st.columns(4)
+    col_1, col_2, col_3 = st.columns(3)
     col_1.metric("合计金额", fmt_money(answer.get("total_cents")))
     col_2.metric("命中笔数", f"{answer.get('count', 0)} 笔")
     col_3.metric("类别", answer.get("category") or "全部")
-    period = "-"
-    if answer.get("date_from") or answer.get("date_to"):
-        start_dt = to_local(answer.get("date_from")) if answer.get("date_from") else None
-        end_dt = to_local(answer.get("date_to")) if answer.get("date_to") else None
-        if start_dt and end_dt:
-            # 同一年只显示 月-日，避免指标卡里被截断
-            fmt = "%m-%d" if start_dt.year == end_dt.year else "%Y-%m-%d"
-            period = f"{start_dt.strftime(fmt)} ~ {end_dt.strftime(fmt)}"
-        else:
-            period = (start_dt or end_dt).strftime("%Y-%m-%d")
-    col_4.metric("时间范围", period)
+
+    # 时间范围：两边都有就显示区间，只有一边就显示单日
+    period = "不限"
+    start_dt = to_local(answer.get("date_from")) if answer.get("date_from") else None
+    end_dt = to_local(answer.get("date_to")) if answer.get("date_to") else None
+    if start_dt and end_dt:
+        period = f"{start_dt:%Y-%m-%d} ~ {end_dt:%Y-%m-%d}"
+    elif start_dt or end_dt:
+        period = f"{(start_dt or end_dt):%Y-%m-%d}"
 
     engine = answer.get("engine")
-    st.caption(
-        "解析方式：大模型" if engine == "llm" else "解析方式：规则兜底（未配置大模型时）"
-    )
+    engine_text = "大模型" if engine == "llm" else "规则兜底（未配置大模型时）"
+    st.caption(f"时间范围：{period}　·　解析方式：{engine_text}")
 
     items = answer.get("items") or []
     if items:
@@ -677,13 +766,16 @@ def render_stats_page() -> None:
             delta = f"{(total_cents - prev_total) / prev_total * 100:+.0f}% 环比"
 
     with st.container(border=True):
-        col_1, col_2, col_3, col_4 = st.columns(4)
+        col_1, col_2, col_3 = st.columns(3)
         col_1.metric("总支出", fmt_money(total_cents), delta=delta, delta_color="inverse")
         col_2.metric("笔数", f"{count} 笔")
         col_3.metric("类别数", f"{len(items)} 类")
-        col_4.metric(
-            "最大类别",
-            f"{top['category']} {fmt_money(top['total_cents'])}" if top else "-",
+
+    # 最大类别单独一行说明，避免塞进指标卡被截断
+    if top:
+        st.caption(
+            f"最大类别：**{top['category']}** {fmt_money(top['total_cents'])}"
+            f"（占 {top['ratio']:.0%}）"
         )
 
     # 本月视图额外带上预算进度，和「预算管理」页呼应
@@ -758,7 +850,7 @@ def render_stats_page() -> None:
                 width="stretch",
             )
     else:
-        st.info("这个时间范围内还没有账单。")
+        empty_state("📭", "这个时间范围没有账单", "换个时间范围试试，或先去记一笔")
 
     # ---------- 月度趋势 ----------
     st.divider()
@@ -772,7 +864,11 @@ def render_stats_page() -> None:
         trend_frame = pd.DataFrame(series)
         st.altair_chart(
             alt.Chart(trend_frame)
-            .mark_line(point=True, color="#3B82F6", strokeWidth=2)
+            .mark_line(
+                color="#4F46E5",
+                strokeWidth=2.5,
+                point=alt.OverlayMarkDef(color="#4F46E5", size=70, filled=True),
+            )
             .encode(
                 x=alt.X("月份:N", title=None, axis=alt.Axis(labelAngle=0)),
                 y=alt.Y("金额:Q", title="支出（元）"),
@@ -784,7 +880,7 @@ def render_stats_page() -> None:
             use_container_width=True,
         )
     else:
-        st.info("最近 6 个月还没有支出记录。")
+        empty_state("📈", "还没有趋势数据", "记几笔账之后，这里会显示最近 6 个月的支出变化")
 
     # ---------- 账单明细 ----------
     st.divider()
@@ -811,10 +907,30 @@ def render_stats_page() -> None:
         )
         render_delete_transaction(records)
     else:
-        st.info("还没有账单，先去「一句话记账」添加一笔。")
+        empty_state("📒", "还没有账单", "先去「一句话记账」添加一笔")
 
 
 # ===================== 页面：预算 =====================
+
+
+def budget_bar(ratio: float, status: str | None) -> None:
+    """按状态着色的预算进度条：正常主色、接近上限黄色、超支红色。
+
+    Streamlit 自带的 st.progress 只能统一配色，这里用一段 HTML 实现，
+    让超支/接近上限在视觉上更直观。
+    """
+    color = {"exceeded": "#EF4444", "warning": "#F59E0B"}.get(status or "", "#4F46E5")
+    width = max(0.0, min(ratio, 1.0)) * 100
+    st.markdown(
+        f"""
+        <div style="background:#EEF1FA;border-radius:6px;height:9px;overflow:hidden;
+                    margin:2px 0 8px;">
+          <div style="width:{width:.1f}%;height:100%;background:{color};
+                      border-radius:6px;"></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_budget_row(item: dict) -> None:
@@ -833,7 +949,7 @@ def render_budget_row(item: dict) -> None:
             if st.button("删除", key=f"budget_delete_{item['id']}"):
                 st.session_state["pending_budget_id"] = item["id"]
 
-        st.progress(min(ratio, 1.0))
+        budget_bar(ratio, status)
 
         if status == "exceeded":
             st.error(f"已超支 {fmt_money(-remain)}（{ratio:.0%}）")
@@ -893,7 +1009,7 @@ def render_budget_page() -> None:
         for item in items:
             render_budget_row(item)
     else:
-        st.info(f"{month} 还没有设置预算，先在下面添加一条。")
+        empty_state("🎯", "这个月还没设预算", "在下面添加一条总额或分类预算")
 
     st.divider()
     st.subheader("设置预算")
@@ -1005,23 +1121,43 @@ def backend_online() -> bool:
 def main() -> None:
     """应用入口：侧边栏导航 + 页面分发。"""
     st.set_page_config(page_title="AI 记账助手", page_icon="📒", layout="wide")
+    inject_styles()
 
     # 支持通过 ?page=budget 直接打开某个页面（演示、截图、分享都方便）
     default_key = st.query_params.get("page", "record")
     keys = list(PAGES)
     index = keys.index(default_key) if default_key in keys else 0
 
-    st.sidebar.title("📒 AI 记账助手")
-    selected_label = st.sidebar.radio("功能菜单", list(PAGES.values()), index=index)
+    st.sidebar.markdown(
+        """
+        <div style="display:flex;align-items:center;gap:10px;padding:2px 0 8px;">
+          <div style="width:40px;height:40px;border-radius:12px;background:#4F46E5;
+                      display:flex;align-items:center;justify-content:center;
+                      font-size:21px;box-shadow:0 4px 10px rgba(79,70,229,.25);">📒</div>
+          <div>
+            <div style="font-size:17px;font-weight:650;color:#1F2430;line-height:1.2;">
+              AI 记账助手
+            </div>
+            <div style="font-size:12px;color:#7A8299;margin-top:2px;">
+              个人消费记录与分析
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    selected_label = st.sidebar.radio(
+        "功能菜单", list(PAGES.values()), index=index, label_visibility="collapsed"
+    )
     selected_key = keys[list(PAGES.values()).index(selected_label)]
 
     st.sidebar.divider()
-    st.sidebar.caption("记账 · 查账 · 统计 · 预算 · 对话")
     if backend_online():
         st.sidebar.success("后端已连接")
     else:
         st.sidebar.error("后端未连接")
         st.sidebar.caption(f"请确认 {API_URL} 正在运行")
+    st.sidebar.caption(f"{APP_VERSION} · 数据保存在本地 MySQL")
 
     show_flash()
     {
@@ -1031,6 +1167,11 @@ def main() -> None:
         "budget": render_budget_page,
         "assistant": render_assistant_page,
     }[selected_key]()
+
+    st.divider()
+    st.caption(
+        "AI 记账助手 · 课程演示项目；账目只保存在本机数据库，页面内容不构成理财建议。"
+    )
 
 
 if __name__ == "__main__":
