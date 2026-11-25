@@ -1,0 +1,312 @@
+"""页面：账单明细与分类统计，含删除、趋势图与 CSV 导出。"""
+
+from __future__ import annotations
+
+from datetime import date, time, timedelta
+
+import altair as alt
+import pandas as pd
+import streamlit as st
+
+from config import CATEGORIES, CATEGORY_COLORS
+from api_client import ApiError, api_delete, api_get
+from formatting import export_csv, fmt_local, fmt_money, iso_at, month_options, to_yuan, transactions_frame
+from components import empty_state, flash
+
+
+RANGE_OPTIONS = ["本月", "上月", "近 30 天", "今年", "全部", "自定义"]
+
+
+def resolve_range(option: str, custom_start: date, custom_end: date):
+    """把时间范围选项换算成 (from, to) 两个 ISO 字符串；返回 None 表示不限。"""
+    today = date.today()
+    if option == "本月":
+        return iso_at(today.replace(day=1)), iso_at(today, time(23, 59, 59))
+    if option == "上月":
+        first = today.replace(day=1)
+        last_month_end = first - timedelta(days=1)
+        return (
+            iso_at(last_month_end.replace(day=1)),
+            iso_at(last_month_end, time(23, 59, 59)),
+        )
+    if option == "近 30 天":
+        return iso_at(today - timedelta(days=29)), iso_at(today, time(23, 59, 59))
+    if option == "今年":
+        return iso_at(today.replace(month=1, day=1)), iso_at(today, time(23, 59, 59))
+    if option == "自定义":
+        return iso_at(custom_start), iso_at(custom_end, time(23, 59, 59))
+    return None, None
+
+
+def month_bounds(month: str) -> tuple[str, str]:
+    """把 YYYY-MM 换算成当月起止的 ISO 时间（东八区，含首尾）。"""
+    year, mon = (int(part) for part in month.split("-"))
+    start = date(year, mon, 1)
+    end = date(year + (mon // 12), mon % 12 + 1, 1) - timedelta(days=1)
+    return iso_at(start), iso_at(end, time(23, 59, 59))
+
+
+def previous_period(option: str) -> tuple[str | None, str | None]:
+    """上一个等长周期的起止时间，用于环比；不支持的选项返回 (None, None)。
+
+    「本月」页面统计的是月初到当天，对比基期也截到同一天数（上月没有这一天时
+    取月末），避免不足一个月和整月相减；「上月」是整月，对比前月整月。
+    """
+    today = date.today()
+    last_month_end = today.replace(day=1) - timedelta(days=1)
+    last_month_start = last_month_end.replace(day=1)
+    if option == "本月":
+        same_day = min(today.day, last_month_end.day)
+        return iso_at(last_month_start), iso_at(
+            last_month_end.replace(day=same_day), time(23, 59, 59)
+        )
+    if option == "上月":
+        prev_month_end = last_month_start - timedelta(days=1)
+        return (
+            iso_at(prev_month_end.replace(day=1)),
+            iso_at(prev_month_end, time(23, 59, 59)),
+        )
+    if option == "近 30 天":
+        end = today - timedelta(days=30)
+        start = end - timedelta(days=29)
+        return iso_at(start), iso_at(end, time(23, 59, 59))
+    return None, None
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def monthly_series(months: tuple[str, ...]) -> list[dict]:
+    """近若干个月的支出合计，供趋势图使用。
+
+    后端没有「按月汇总」的接口，这里按月各查一次 /stats/category；
+    结果按 120 秒缓存，切换页面或拖动表单不会反复打后端。
+    """
+    rows: list[dict] = []
+    for month in months:
+        start, end = month_bounds(month)
+        data = api_get("/stats/category", params={"from": start, "to": end})
+        rows.append(
+            {"月份": month[5:], "全月": month, "金额": to_yuan(data.get("total_cents", 0))}
+        )
+    return rows
+
+
+def render_delete_transaction(items: list[dict]) -> None:
+    """账单删除：先选一条，再二次确认，确认后调用后端 DELETE。"""
+    if not items:
+        return
+
+    labels = {
+        f"{fmt_local(item.get('occurred_at'))}  {item.get('merchant')}  "
+        f"{fmt_money(item.get('amount_cents'))}（#{item['id']}）": item["id"]
+        for item in items
+    }
+    choice = st.selectbox("选择要删除的账单", list(labels), key="delete_choice")
+
+    if st.button("🗑️ 删除这笔账单", key="delete_request"):
+        st.session_state["pending_delete_id"] = labels[choice]
+
+    pending = st.session_state.get("pending_delete_id")
+    if not pending:
+        return
+
+    st.warning("确认删除？删除后无法恢复。")
+    col_yes, col_no = st.columns(2)
+    if col_yes.button("确认删除", type="primary", key="delete_confirm"):
+        try:
+            api_delete(f"/transactions/{pending}")
+        except ApiError as exc:
+            st.error(f"删除失败：{exc.message}")
+        else:
+            st.session_state.pop("pending_delete_id", None)
+            flash("账单已删除。")
+            st.rerun()
+    if col_no.button("取消", key="delete_cancel"):
+        st.session_state.pop("pending_delete_id", None)
+        st.rerun()
+
+
+def render_stats_page() -> None:
+    """页面 3：账单明细 + 分类统计。"""
+    st.header("📊 账单与统计")
+    st.caption("按时间范围查看消费构成与明细，可以在这里删除账单。")
+
+    col_range, col_start, col_end = st.columns([2, 1, 1])
+    with col_range:
+        option = st.selectbox("时间范围", RANGE_OPTIONS, key="stats_range")
+    custom_start, custom_end = date.today().replace(day=1), date.today()
+    if option == "自定义":
+        with col_start:
+            custom_start = st.date_input("开始日期", value=custom_start, key="stats_from")
+        with col_end:
+            custom_end = st.date_input("结束日期", value=custom_end, key="stats_to")
+
+    date_from, date_to = resolve_range(option, custom_start, custom_end)
+
+    # ---------- 分类统计 ----------
+    try:
+        stats = api_get("/stats/category", params={"from": date_from, "to": date_to})
+    except ApiError as exc:
+        st.error(f"读取统计失败：{exc.message}")
+        return
+
+    total_cents = stats.get("total_cents", 0)
+    items = stats.get("items") or []
+    top = max(items, key=lambda i: i["total_cents"]) if items else None
+    count = sum(item["count"] for item in items)
+
+    # 环比：只对能算出上一等长周期的选项计算
+    delta = None
+    prev_from, prev_to = previous_period(option)
+    if prev_from and prev_to:
+        try:
+            prev_total = api_get(
+                "/stats/category", params={"from": prev_from, "to": prev_to}
+            ).get("total_cents", 0)
+        except ApiError:
+            prev_total = 0
+        if prev_total:
+            delta = f"{(total_cents - prev_total) / prev_total * 100:+.0f}% 环比"
+
+    with st.container(border=True):
+        col_1, col_2, col_3 = st.columns(3)
+        col_1.metric("总支出", fmt_money(total_cents), delta=delta, delta_color="inverse")
+        col_2.metric("笔数", f"{count} 笔")
+        col_3.metric("类别数", f"{len(items)} 类")
+
+    # 最大类别单独一行说明，避免塞进指标卡被截断
+    if top:
+        st.caption(
+            f"最大类别：**{top['category']}** {fmt_money(top['total_cents'])}"
+            f"（占 {top['ratio']:.0%}）"
+        )
+
+    # 本月视图额外带上预算进度，和「预算管理」页呼应
+    if option == "本月":
+        try:
+            overview = api_get("/budgets", params={"month": month_options(1)[0]})
+        except ApiError:
+            overview = None
+        if overview:
+            budget_total = next(
+                (
+                    row["amount_cents"]
+                    for row in overview.get("items", [])
+                    if row.get("category") is None
+                ),
+                None,
+            )
+            spent = overview.get("spent_cents", 0)
+            if budget_total:
+                ratio = spent / budget_total
+                st.progress(
+                    min(ratio, 1.0),
+                    text=(
+                        f"本月总预算 {fmt_money(budget_total)}，已用 {ratio:.0%}，"
+                        f"剩余 {fmt_money(max(budget_total - spent, 0))}"
+                    ),
+                )
+
+    if items:
+        frame = pd.DataFrame(
+            [
+                {
+                    "类别": item["category"],
+                    "金额": to_yuan(item["total_cents"]),
+                    "占比": item["ratio"],
+                    "笔数": item["count"],
+                }
+                for item in items
+            ]
+        )
+        color_scale = alt.Scale(domain=CATEGORIES, range=CATEGORY_COLORS)
+        col_bar, col_pie = st.columns(2)
+        with col_bar:
+            st.altair_chart(
+                alt.Chart(frame)
+                .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+                .encode(
+                    x=alt.X("类别:N", sort="-y", title=None, axis=alt.Axis(labelAngle=0)),
+                    y=alt.Y("金额:Q", title="金额（元）"),
+                    color=alt.Color("类别:N", scale=color_scale, legend=None),
+                    tooltip=["类别", alt.Tooltip("金额:Q", format=",.2f"), "笔数"],
+                ),
+                width="stretch",
+            )
+        with col_pie:
+            st.altair_chart(
+                alt.Chart(frame)
+                .mark_arc(innerRadius=50)
+                .encode(
+                    theta=alt.Theta("金额:Q"),
+                    color=alt.Color(
+                        "类别:N",
+                        scale=color_scale,
+                        legend=alt.Legend(title="类别", orient="right"),
+                    ),
+                    tooltip=[
+                        "类别",
+                        alt.Tooltip("金额:Q", format=",.2f"),
+                        alt.Tooltip("占比:Q", format=".1%"),
+                    ],
+                ),
+                width="stretch",
+            )
+    else:
+        empty_state("📭", "这个时间范围没有账单", "换个时间范围试试，或先去记一笔")
+
+    # ---------- 月度趋势 ----------
+    st.divider()
+    st.subheader("📈 近 6 个月支出趋势")
+    try:
+        series = monthly_series(tuple(month_options(6)[::-1]))
+    except ApiError as exc:
+        st.error(f"读取趋势失败：{exc.message}")
+        series = []
+    if series and any(row["金额"] for row in series):
+        trend_frame = pd.DataFrame(series)
+        st.altair_chart(
+            alt.Chart(trend_frame)
+            .mark_line(
+                color="#4F46E5",
+                strokeWidth=2.5,
+                point=alt.OverlayMarkDef(color="#4F46E5", size=70, filled=True),
+            )
+            .encode(
+                x=alt.X("月份:N", title=None, axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("金额:Q", title="支出（元）"),
+                tooltip=[
+                    alt.Tooltip("全月:N", title="月份"),
+                    alt.Tooltip("金额:Q", format=",.2f"),
+                ],
+            ),
+            use_container_width=True,
+        )
+    else:
+        empty_state("📈", "还没有趋势数据", "记几笔账之后，这里会显示最近 6 个月的支出变化")
+
+    # ---------- 账单明细 ----------
+    st.divider()
+    st.subheader("🧾 账单明细")
+    try:
+        listing = api_get(
+            "/transactions",
+            params={"from": date_from, "to": date_to, "limit": 100},
+        )
+    except ApiError as exc:
+        st.error(f"读取账单失败：{exc.message}")
+        return
+
+    records = listing.get("items") or []
+    if records:
+        st.dataframe(transactions_frame(records), width="stretch", hide_index=True)
+        st.caption(f"共 {listing.get('total', len(records))} 条，当前展示最近 {len(records)} 条。")
+        st.download_button(
+            "⬇️ 导出 CSV",
+            export_csv(records),
+            file_name=f"账单_{date.today():%Y%m%d}.csv",
+            mime="text/csv",
+            key="export_csv_button",
+        )
+        render_delete_transaction(records)
+    else:
+        empty_state("📒", "还没有账单", "先去「一句话记账」添加一笔")
