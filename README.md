@@ -49,7 +49,12 @@ ai-Accounting-Assistant/
 │   ├── .env.example                # 环境变量示例
 │   └── Dockerfile
 ├── frontend/                       # 前端页面
-│   ├── app.py                      # 单文件页面：记账、查账、统计、预算、智能助手
+│   ├── app.py                      # 入口：页面配置、侧边栏导航与页面分发
+│   ├── config.py                   # 后端地址、时区、类别与图表配色
+│   ├── api_client.py               # 接口请求封装与错误转换
+│   ├── formatting.py               # 金额、时间格式化与 CSV 导出
+│   ├── components.py               # 全局样式、空状态、进度条等通用组件
+│   ├── views/                      # 五个功能页：record / query / stats / budget / assistant
 │   └── .streamlit/config.toml      # 主题色、上传大小与图表配色
 └── docs/                           # 接口文档
 ```
