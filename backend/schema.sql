@@ -14,7 +14,7 @@ create table if not exists transactions(
   category varchar(30), -- 所属分类名称（如：餐饮、网购）
   occurred_at datetime not null, -- 消费发生的时间，年月日时分秒YYYY-MM-DD HH:MM:SS，用户录入，方便AI对比真实录入时间知道你的录入习惯
   created_at  datetime default current_timestamp,   -- 记录录入时间（系统自动填）
-  source varchar(16) not null, -- 拿来追溯的，支付宝微信银行卡
+  source varchar(16) not null, -- 拿来追溯的，接收文本，小票和用户输入
   raw_input text, -- 原始输入（用户原文）比如我今天在沙县吃了十块钱饺子
   confidence decimal(4,2) default 1.00, -- 抽取置信度 0.00-1.00
   status varchar(16) default 'confirmed', -- 状态-pending待确认，confirmed确认这里默认设置为确认
